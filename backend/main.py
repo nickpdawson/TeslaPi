@@ -17,6 +17,7 @@ from backend.routers import (
     archive,
     auto_sync,
     config,
+    customization,
     dashcam,
     diagnostics,
     files,
@@ -127,6 +128,7 @@ app.include_router(status.router, prefix="/api", tags=["status"])
 app.include_router(archive.router, prefix="/api", tags=["archive"])
 app.include_router(system.router, prefix="/api", tags=["system"])
 app.include_router(config.router, prefix="/api", tags=["config"])
+app.include_router(customization.router, prefix="/api", tags=["customization"])
 app.include_router(gadget.router, prefix="/api", tags=["gadget"])
 app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
 app.include_router(files.router, prefix="/api", tags=["files"])

@@ -152,6 +152,12 @@ class DriveInfo(BaseModel):
     type: str = ""
 
 
+class LockChimeStatus(BaseModel):
+    installed: bool = False
+    filename: str | None = None
+    size: int = 0
+
+
 # --- WiFi models ---
 
 

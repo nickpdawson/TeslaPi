@@ -5,6 +5,7 @@ import { ShareSettings } from './ShareSettings';
 import { DriveSettings } from './DriveSettings';
 import { NotifySettings } from './NotifySettings';
 import { HASettings } from './HASettings';
+import { LockChimeSettings } from './LockChimeSettings';
 import { SystemSettings } from './SystemSettings';
 import { get, put } from '../../api/client';
 import { addNotification } from '../../stores/appState';
@@ -341,6 +342,23 @@ export function Settings(_props: SettingsProps) {
         >
           <p class="text-sm text-secondary">
             Email, Telegram, Discord, Pushover, and other alert channels
+          </p>
+        </Card>
+
+        <Card
+          title="Lock Chime"
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="11,5 6,9 2,9 2,15 6,15 11,19" />
+              <path d="M19.07 4.93a10 10 0 010 14.14" />
+              <path d="M15.54 8.46a5 5 0 010 7.07" />
+            </svg>
+          }
+          expandable
+          expandContent={<LockChimeSettings />}
+        >
+          <p class="text-sm text-secondary">
+            Custom lock chime sound for the Tesla boombox USB drive
           </p>
         </Card>
 

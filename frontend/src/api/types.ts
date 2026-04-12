@@ -458,6 +458,14 @@ export interface AutoUpdateConfig {
   last_check: string | null;
 }
 
+// --- Lock Chime / Customization types ---
+
+export interface LockChimeStatus {
+  installed: boolean;
+  filename: string | null;
+  size: number;
+}
+
 export interface ArchiveJob {
   id: number;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
