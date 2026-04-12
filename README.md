@@ -43,6 +43,19 @@ Inspired by marcone/teslausb's proven USB gadget approach, TeslaPi is built from
 - Keyboard navigation support
 
 ### Home Assistant Integration
+
+**Recommended:** Install the [TeslaPi HACS Component](https://github.com/nickpdawson/TeslaPi_HACS) for full Home Assistant integration. It provides:
+- 10 sensors (status, CPU temp, storage, WiFi signal, archive/sync timestamps, artist count)
+- 6 binary sensors (online, gadget active, archive running, music syncing, server reachable, auto-sync)
+- 3 buttons (Archive Now, Sync Music, Reboot)
+- 2 switches (USB Gadget, Auto-Sync)
+- Media browser for dashcam clips (browse and play from HA Media panel)
+- Custom services with full parameter control
+- Config flow with auto-discovery
+
+Install via HACS or manually. See the [TeslaPi_HACS repository](https://github.com/nickpdawson/TeslaPi_HACS) for setup instructions.
+
+The TeslaPi backend also supports direct REST API integration:
 - Push 8 sensor entities to Home Assistant via REST API (status, storage, temperature, timestamps)
 - Optional MQTT with auto-discovery
 - Background state push every 30 seconds
