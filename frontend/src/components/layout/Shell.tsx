@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact';
 import { theme, toggleTheme } from '../../stores/appState';
 import { StatusBar } from './StatusBar';
 import { ToastContainer } from '../common/Toast';
+import { useStatus } from '../../hooks/useStatus';
 
 interface ShellProps {
   children: ComponentChildren;
@@ -52,6 +53,9 @@ function SettingsIcon() {
 }
 
 export function Shell({ children }: ShellProps) {
+  // Poll status on every page — keeps the Connected/Offline indicator accurate
+  useStatus();
+
   return (
     <div style={{ minHeight: '100vh' }}>
       <header class="app-header">

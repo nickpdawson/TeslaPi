@@ -256,9 +256,12 @@ def _get_event_detail(event_id: str) -> EventDetailResponse | None:
 
 @router.get("/events", response_model=list[EventResponse])
 async def list_events(type: str | None = None) -> list[EventResponse]:
-    """List all dashcam events, optionally filtered by type.
+    """List all dashcam events from the archived clips database.
 
-    Scans TeslaCam subdirectories for timestamped event folders.
+    Since the cam image cannot be mounted while the USB gadget is active,
+    we read from the dashcam_archived_clips DB table which tracks all
+    clips that have been archived to the NAS.
+
     In dev mode, returns mock data.
     """
     if settings.dev_mode:
@@ -267,7 +270,63 @@ async def list_events(type: str | None = None) -> list[EventResponse]:
             events = [e for e in events if e.type == type]
         return events
 
-    return _scan_events(type_filter=type)
+    # Read from DB instead of filesystem
+    import aiosqlite
+    db_path = str(settings.database_path)
+    events: list[EventResponse] = []
+
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL")
+
+            query = """SELECT event_type, event_dir,
+                              GROUP_CONCAT(clip_file) as clip_files,
+                              COUNT(*) as clip_count,
+                              MAX(archived_at) as archived_at
+                       FROM dashcam_archived_clips"""
+            params: list = []
+            if type:
+                # Map frontend types to DB types
+                db_type = "SentryClips" if type == "sentry" else "SavedClips" if type == "saved" else type
+                query += " WHERE event_type = ?"
+                params.append(db_type)
+            query += " GROUP BY event_type, event_dir ORDER BY event_dir DESC LIMIT 50"
+
+            async with db.execute(query, params) as cursor:
+                async for row in cursor:
+                    event = dict(row)
+                    event_type = event.get("event_type", "")
+                    event_dir = event.get("event_dir", "")
+                    display_type = "sentry" if "sentry" in event_type.lower() else "saved"
+
+                    # Extract cameras from clip filenames
+                    cameras = []
+                    for clip_file in (event.get("clip_files", "") or "").split(","):
+                        parts = clip_file.rsplit("-", 1)
+                        if len(parts) == 2:
+                            cam = parts[1].replace(".mp4", "").strip()
+                            if cam and cam not in cameras:
+                                cameras.append(cam)
+
+                    # Parse timestamp from event_dir (2026-04-12_10-00-02)
+                    ts_date = event_dir[:10] if len(event_dir) >= 10 else event_dir
+                    ts_time = event_dir[11:].replace("-", ":") if len(event_dir) > 11 else "00:00:00"
+                    timestamp = f"{ts_date}T{ts_time}"
+
+                    events.append(EventResponse(
+                        id=f"{display_type}__{event_dir}",
+                        type=display_type,
+                        timestamp=timestamp,
+                        cameras=sorted(cameras),
+                        archived=True,
+                    ))
+    except Exception as exc:
+        logger.error("Failed to read dashcam events from DB: %s", exc)
+        # Fall back to filesystem scan if DB fails
+        return _scan_events(type_filter=type)
+
+    return events
 
 
 @router.get("/events/{event_id}", response_model=EventDetailResponse)
