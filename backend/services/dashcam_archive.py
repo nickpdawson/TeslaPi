@@ -1,0 +1,515 @@
+"""Dashcam archive service — rsync clips to network share with DB tracking."""
+
+import asyncio
+import logging
+import os
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import aiosqlite
+
+from backend.config import settings
+from backend.services import script_runner
+from backend.services import share_browser
+
+logger = logging.getLogger(__name__)
+
+# Active archive tracking
+_active_archive: dict = {
+    "job_id": None,
+    "process": None,
+    "cancelled": False,
+}
+
+CAM_IMAGE = "/backingfiles/cam_disk.bin"
+CAM_MOUNT = "/mnt/cam"
+ARCHIVE_MOUNT = "/mnt/archive"
+ARCHIVE_DIRS = ("SavedClips", "SentryClips")
+
+
+def _get_archive_share_config() -> dict | None:
+    """Read archive share config from teslausb_setup_variables.conf.
+
+    Looks for ARCHIVE_SERVER/archive_share_server, SHARE_NAME/archive_share_path, etc.
+    Returns dict with: server, share_name, username, password, domain.
+    """
+    from backend.services.config_manager import read_config
+
+    cfg = read_config()
+    if not cfg:
+        return None
+
+    server = cfg.get("archive_share_server") or cfg.get("ARCHIVE_SERVER", "")
+    share_name = cfg.get("archive_share_path") or cfg.get("SHARE_NAME", "")
+    username = cfg.get("archive_share_username") or cfg.get("SHARE_USER", "")
+    password = cfg.get("archive_share_password") or cfg.get("SHARE_PASSWORD", "")
+    domain = cfg.get("archive_share_domain") or cfg.get("SHARE_DOMAIN", "")
+
+    if not server or not share_name:
+        return None
+
+    return {
+        "server": server,
+        "share_name": share_name,
+        "username": username,
+        "password": password,
+        "domain": domain,
+    }
+
+
+async def start_archive(
+    trigger: str = "manual",
+    delete_after: bool = False,
+) -> int:
+    """Create an archive job and start the background archive task.
+
+    Args:
+        trigger: "manual" or "auto".
+        delete_after: If True, delete clips from cam after successful archive.
+
+    Returns:
+        Job ID.
+    """
+    if _active_archive["job_id"] is not None:
+        raise RuntimeError("An archive is already in progress")
+
+    db_path = str(settings.database_path)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+
+        cursor = await db.execute(
+            """INSERT INTO dashcam_archive_jobs (status, trigger, started_at)
+               VALUES (?, ?, ?)""",
+            ("pending", trigger, datetime.now(timezone.utc).isoformat()),
+        )
+        job_id = cursor.lastrowid
+        await db.commit()
+
+    _active_archive["job_id"] = job_id
+    _active_archive["cancelled"] = False
+
+    asyncio.create_task(_run_archive(job_id, delete_after))
+    return job_id
+
+
+async def _run_archive(job_id: int, delete_after: bool) -> None:
+    """Background archive task with full mount lifecycle."""
+    db_path = str(settings.database_path)
+    try:
+        await _update_job(db_path, job_id, status="running")
+
+        if settings.dev_mode:
+            await _run_archive_dev(job_id, db_path)
+            return
+
+        # Step 1: Mount cam image read-only (safe while Tesla writes through gadget)
+        logger.info("Archive job %d: mounting cam image read-only", job_id)
+        result = await script_runner.run(
+            "mount", ["-o", "ro,loop", CAM_IMAGE, CAM_MOUNT], timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to mount cam image: {result.stderr}")
+
+        try:
+            # Step 2: Discover unarchived clips
+            unarchived = await _discover_unarchived(db_path)
+
+            if not unarchived:
+                logger.info("Archive job %d: no new clips to archive", job_id)
+                await _update_job(db_path, job_id, status="completed",
+                                  clips_total=0, bytes_total=0)
+                return
+
+            total_bytes = sum(c["size_bytes"] for c in unarchived)
+            await _update_job(db_path, job_id,
+                              clips_total=len(unarchived),
+                              bytes_total=total_bytes)
+
+            # Step 3: Mount archive CIFS share with RW access
+            share_cfg = _get_archive_share_config()
+            if not share_cfg:
+                raise RuntimeError("Archive share not configured")
+
+            logger.info("Archive job %d: mounting archive share on %s",
+                        job_id, share_cfg["server"])
+            mounted = await share_browser.mount_share(
+                share_type="cifs",
+                server=share_cfg["server"],
+                path=share_cfg["share_name"],
+                mountpoint=ARCHIVE_MOUNT,
+                username=share_cfg["username"],
+                password=share_cfg["password"],
+                domain=share_cfg["domain"],
+                read_only=False,
+            )
+            if not mounted:
+                raise RuntimeError("Failed to mount archive share")
+
+            try:
+                # Step 4: Ensure destination directories exist
+                for d in ARCHIVE_DIRS:
+                    dest = os.path.join(ARCHIVE_MOUNT, "TeslaCam", d)
+                    os.makedirs(dest, exist_ok=True)
+
+                # Step 5: rsync each event directory
+                clips_copied = 0
+                bytes_copied = 0
+                clips_deleted = 0
+
+                for clip in unarchived:
+                    if _active_archive["cancelled"]:
+                        raise asyncio.CancelledError()
+
+                    src = os.path.join(
+                        CAM_MOUNT, "TeslaCam", clip["event_type"],
+                        clip["event_dir"], clip["clip_file"],
+                    )
+                    # Archive to root of share: /SavedClips/{event_dir}/
+                    # (matches existing teslausb archive structure)
+                    dest_dir = os.path.join(
+                        ARCHIVE_MOUNT, clip["event_type"],
+                        clip["event_dir"],
+                    )
+                    os.makedirs(dest_dir, exist_ok=True)
+
+                    result = await script_runner.run(
+                        "rsync",
+                        [
+                            "-a", "--partial", "--timeout=60",
+                            src, dest_dir + "/",
+                        ],
+                        timeout=300,
+                    )
+
+                    if result.returncode not in (0, 23):
+                        logger.warning(
+                            "Archive job %d: rsync failed for %s: %s",
+                            job_id, clip["clip_file"], result.stderr,
+                        )
+                        continue
+
+                    clips_copied += 1
+                    bytes_copied += clip["size_bytes"]
+
+                    # Record in DB
+                    async with aiosqlite.connect(db_path) as db:
+                        await db.execute("PRAGMA journal_mode=WAL")
+                        await db.execute(
+                            """INSERT OR IGNORE INTO dashcam_archived_clips
+                               (event_type, event_dir, clip_file, size_bytes, archive_job_id)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (clip["event_type"], clip["event_dir"],
+                             clip["clip_file"], clip["size_bytes"], job_id),
+                        )
+                        await db.commit()
+
+                    # Delete from cam if requested
+                    if delete_after:
+                        del_result = await script_runner.run(
+                            "rm", ["-f", src], timeout=10,
+                        )
+                        if del_result.returncode == 0:
+                            clips_deleted += 1
+                            async with aiosqlite.connect(db_path) as db:
+                                await db.execute("PRAGMA journal_mode=WAL")
+                                await db.execute(
+                                    """UPDATE dashcam_archived_clips
+                                       SET deleted_from_cam = 1
+                                       WHERE event_type = ? AND event_dir = ? AND clip_file = ?""",
+                                    (clip["event_type"], clip["event_dir"],
+                                     clip["clip_file"]),
+                                )
+                                await db.commit()
+
+                    # Update progress periodically
+                    if clips_copied % 5 == 0 or clips_copied == len(unarchived):
+                        await _update_job(
+                            db_path, job_id,
+                            clips_copied=clips_copied,
+                            bytes_copied=bytes_copied,
+                            clips_deleted=clips_deleted,
+                        )
+
+                await _update_job(
+                    db_path, job_id,
+                    status="completed",
+                    clips_copied=clips_copied,
+                    bytes_copied=bytes_copied,
+                    clips_deleted=clips_deleted,
+                )
+
+            finally:
+                # Step 6: Unmount archive share
+                logger.info("Archive job %d: unmounting archive share", job_id)
+                await share_browser.unmount_share(ARCHIVE_MOUNT)
+
+        finally:
+            # Step 7: Unmount cam image
+            logger.info("Archive job %d: unmounting cam image", job_id)
+            await script_runner.run("umount", [CAM_MOUNT], timeout=15)
+
+    except asyncio.CancelledError:
+        logger.info("Archive job %d: cancelled", job_id)
+        await _update_job(db_path, job_id, status="cancelled")
+    except Exception as exc:
+        logger.error("Archive job %d failed: %s", job_id, exc)
+        await _update_job(db_path, job_id, status="failed", error=str(exc))
+    finally:
+        _active_archive["job_id"] = None
+        _active_archive["process"] = None
+        _active_archive["cancelled"] = False
+
+
+async def _run_archive_dev(job_id: int, db_path: str) -> None:
+    """Simulate archive with progress updates in dev mode."""
+    total_clips = 47
+    total_bytes = 13_207_024_640
+    bytes_per_clip = total_bytes // total_clips
+
+    await _update_job(db_path, job_id, clips_total=total_clips, bytes_total=total_bytes)
+
+    clips_copied = 0
+    bytes_copied = 0
+
+    for i in range(total_clips):
+        if _active_archive["cancelled"]:
+            await _update_job(db_path, job_id, status="cancelled")
+            _active_archive["job_id"] = None
+            return
+
+        clips_copied += 1
+        bytes_copied += bytes_per_clip
+
+        if i % 5 == 0 or i == total_clips - 1:
+            await _update_job(
+                db_path, job_id,
+                clips_copied=clips_copied,
+                bytes_copied=min(bytes_copied, total_bytes),
+            )
+
+        await asyncio.sleep(0.15)
+
+    await _update_job(
+        db_path, job_id,
+        status="completed",
+        clips_copied=total_clips,
+        bytes_copied=total_bytes,
+    )
+    _active_archive["job_id"] = None
+
+
+async def _discover_unarchived(db_path: str) -> list[dict]:
+    """Scan cam dirs and check DB for already archived clips.
+
+    Only looks at SavedClips/ and SentryClips/ (NOT RecentClips).
+    Returns list of dicts with: event_type, event_dir, clip_file, size_bytes.
+    """
+    unarchived = []
+
+    for event_type in ARCHIVE_DIRS:
+        base = os.path.join(CAM_MOUNT, "TeslaCam", event_type)
+        if not os.path.isdir(base):
+            continue
+
+        for event_dir in os.listdir(base):
+            event_path = os.path.join(base, event_dir)
+            if not os.path.isdir(event_path):
+                continue
+
+            for clip_file in os.listdir(event_path):
+                clip_path = os.path.join(event_path, clip_file)
+                if not os.path.isfile(clip_path):
+                    continue
+
+                # Check if already archived
+                async with aiosqlite.connect(db_path) as db:
+                    db.row_factory = aiosqlite.Row
+                    await db.execute("PRAGMA journal_mode=WAL")
+                    async with db.execute(
+                        """SELECT id FROM dashcam_archived_clips
+                           WHERE event_type = ? AND event_dir = ? AND clip_file = ?""",
+                        (event_type, event_dir, clip_file),
+                    ) as cursor:
+                        if await cursor.fetchone():
+                            continue
+
+                try:
+                    size = os.path.getsize(clip_path)
+                except OSError:
+                    size = 0
+
+                unarchived.append({
+                    "event_type": event_type,
+                    "event_dir": event_dir,
+                    "clip_file": clip_file,
+                    "size_bytes": size,
+                })
+
+    return unarchived
+
+
+async def get_archive_status() -> dict:
+    """Get latest job info plus aggregate stats.
+
+    Returns dict with: latest_job, total_clips, total_bytes, server_name, server_reachable.
+    """
+    db_path = str(settings.database_path)
+    result = {
+        "latest_job": None,
+        "total_clips": 0,
+        "total_bytes": 0,
+        "server_name": "",
+        "server_reachable": False,
+    }
+
+    # Get archive server name from config
+    share_cfg = _get_archive_share_config()
+    if share_cfg:
+        result["server_name"] = share_cfg["server"]
+
+        # Quick reachability check (ping with 1s timeout)
+        if not settings.dev_mode:
+            ping = await script_runner.run(
+                "ping", ["-c", "1", "-W", "1", share_cfg["server"]], timeout=5,
+            )
+            result["server_reachable"] = ping.returncode == 0
+        else:
+            result["server_reachable"] = True
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+
+        # Latest job
+        async with db.execute(
+            "SELECT * FROM dashcam_archive_jobs ORDER BY id DESC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                result["latest_job"] = dict(row)
+
+        # Aggregate stats
+        async with db.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(size_bytes), 0) as sz FROM dashcam_archived_clips"
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                result["total_clips"] = row["cnt"]
+                result["total_bytes"] = row["sz"]
+
+    return result
+
+
+async def get_archive_history(limit: int = 20) -> list[dict]:
+    """Get past archive jobs."""
+    db_path = str(settings.database_path)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+
+        jobs = []
+        async with db.execute(
+            "SELECT * FROM dashcam_archive_jobs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            async for row in cursor:
+                jobs.append(dict(row))
+
+    return jobs
+
+
+async def get_archived_clips(
+    event_type: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict:
+    """Get archived clips with optional filtering and pagination."""
+    db_path = str(settings.database_path)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+
+        where = ""
+        params: list = []
+        if event_type:
+            where = "WHERE event_type = ?"
+            params.append(event_type)
+
+        # Count
+        async with db.execute(
+            f"SELECT COUNT(*) as cnt FROM dashcam_archived_clips {where}",
+            params,
+        ) as cursor:
+            row = await cursor.fetchone()
+            total = row["cnt"] if row else 0
+
+        # Paginated results
+        query = f"""SELECT * FROM dashcam_archived_clips {where}
+                    ORDER BY archived_at DESC LIMIT ? OFFSET ?"""
+        params.extend([limit, offset])
+        clips = []
+        async with db.execute(query, params) as cursor:
+            async for row in cursor:
+                clips.append(dict(row))
+
+    return {
+        "clips": clips,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": offset + limit < total,
+    }
+
+
+async def cancel_archive() -> bool:
+    """Cancel the currently running archive."""
+    if _active_archive["job_id"] is None:
+        return False
+
+    _active_archive["cancelled"] = True
+
+    proc = _active_archive.get("process")
+    if proc and proc.returncode is None:
+        try:
+            proc.kill()
+            await proc.wait()
+        except (ProcessLookupError, OSError):
+            pass
+
+    return True
+
+
+async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
+    """Update archive job fields in database."""
+    if not kwargs:
+        return
+
+    set_clauses = []
+    values = []
+
+    for key, val in kwargs.items():
+        if key == "error":
+            set_clauses.append("error_message = ?")
+            values.append(val)
+        elif key == "status":
+            set_clauses.append("status = ?")
+            values.append(val)
+            if val in ("completed", "failed", "cancelled"):
+                set_clauses.append("completed_at = ?")
+                values.append(datetime.now(timezone.utc).isoformat())
+        else:
+            set_clauses.append(f"{key} = ?")
+            values.append(val)
+
+    values.append(job_id)
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute(
+            f"UPDATE dashcam_archive_jobs SET {', '.join(set_clauses)} WHERE id = ?",
+            values,
+        )
+        await db.commit()

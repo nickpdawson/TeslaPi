@@ -1,0 +1,54 @@
+# TeslaPi - Nginx configuration
+# Replaces the default teslausb web UI config
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # Frontend SPA - serve built static files
+    root /var/www/teslapi;
+    index index.html;
+
+    # Gzip compression for frontend assets
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 256;
+
+    # Cache static assets aggressively (they have content hashes)
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API proxy to FastAPI backend
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support for /api/ws/*
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+
+        # Large file uploads (music, etc.)
+        client_max_body_size 0;
+        proxy_request_buffering off;
+    }
+
+    # TeslaCam recordings - direct file serving with directory listing
+    location /TeslaCam/ {
+        alias /mnt/cam/TeslaCam/;
+        autoindex on;
+        autoindex_format json;
+    }
+
+    # SPA fallback - serve index.html for client-side routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

@@ -1,0 +1,120 @@
+#!/bin/bash -eu
+
+title="$1"
+message="$2"
+type="${3:-}"
+
+function send_signal () {
+  log "Sending Signal message."
+
+  curl -X POST -H "Content-Type: application/json" "$SIGNAL_URL/v2/send" \
+     -d '{"message": "'"$message"'", "number": "'"$SIGNAL_FROM_NUM"'", "recipients": [ "'"$SIGNAL_TO_NUM"'" ]}'
+ }
+
+function send_pushover () {
+  log "Sending Pushover message."
+
+  curl -F "token=$PUSHOVER_APP_KEY" \
+    -F "user=$PUSHOVER_USER_KEY" \
+    -F "title=$title" \
+    -F "message=$message" \
+    https://api.pushover.net/1/messages
+}
+
+function send_gotify () {
+  log "Sending Gotify message."
+
+  curl -X POST \
+    -F "title=$title" \
+    -F "message=$message" \
+    -F "priority=$GOTIFY_PRIORITY" \
+    "$GOTIFY_DOMAIN/message?token=$GOTIFY_APP_TOKEN"
+}
+
+function send_discord() {
+  log "Sending Discord message."
+
+  curl -H "Content-Type: application/json" -d \
+    '{"username": "'"$title"'", "content": "'"$message"'"}' \
+    "$DISCORD_WEBHOOK_URL"
+}
+
+function send_ifttt () {
+  log "Sending IFTTT message."
+
+  curl -X POST -H "Content-Type: application/json" -d \
+    '{"value1":"'"$title"'","value2":"'"$message"'"}' \
+    "https://maker.ifttt.com/trigger/$IFTTT_EVENT_NAME/with/key/$IFTTT_KEY"
+}
+
+function send_sns () {
+  log "Sending SNS message."
+
+  python3 /root/bin/send_sns.py -t "$AWS_SNS_TOPIC_ARN" -s "$title" -m "$message"
+}
+
+function send_matrix() {
+  log "Send Matrix message."
+
+  python3 /root/bin/send_matrix.py "$MATRIX_SERVER_URL" "$MATRIX_USERNAME" "$MATRIX_PASSWORD" "$MATRIX_ROOM" "$title: $message"
+}
+
+function send_telegram () {
+  log "Sending Telegram message."
+  curl -v -H "Content-Type: application/json" -d \
+    '{"chat_id": "'"$TELEGRAM_CHAT_ID"'", "text": "'"$title: $message"'", "disable_notification": '"$TELEGRAM_SILENT_NOTIFY"' }' \
+    https://api.telegram.org/"$TELEGRAM_BOT_TOKEN"/sendMessage
+}
+
+function send_webhook () {
+  log "Sending Webhook message."
+  
+  curl -X POST \
+    -d "{\"value1\":\"${title}\",\"value2\":\"${message}\"}" \
+    -H "Content-Type: application/json" \
+    "$WEBHOOK_URL"
+}
+
+function send_slack () {
+  log "Sending Slack message."
+  payload="{\"text\":\"$title: $message\",\"username\": \"Tesla\",\"icon_emoji\": \":tesla:\"}"
+  curl -X POST --data-urlencode "payload=$payload" "$SLACK_WEBHOOK_URL"
+}
+
+function send_shell () {
+  log "Sending Shell command."
+  if [[ -n "$NOTIFICATION_COMMAND_START" && "$type" = "start" ]]; then
+    eval "$NOTIFICATION_COMMAND_START" &
+  fi
+  if [[ -n "$NOTIFICATION_COMMAND_FINISH" &&  "$type" = "finish" ]]; then
+    eval "$NOTIFICATION_COMMAND_FINISH" &
+  fi
+}
+
+function send_ntfy () {
+  log "Sending ntfy message."
+
+  curl -X POST \
+    -H "Title: $title" \
+    -H "Priority: ${NTFY_PRIORITY:-3}" \
+    ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
+    -d "$message" \
+    "$NTFY_URL"
+}
+
+log "$message"
+
+[ "${SIGNAL_ENABLED:-false}" = "true" ] && send_signal
+[ "${PUSHOVER_ENABLED:-false}" = "true" ] && send_pushover
+[ "${GOTIFY_ENABLED:-false}" = "true" ] && send_gotify
+[ "${DISCORD_ENABLED:-false}" = "true" ] && send_discord
+[ "${IFTTT_ENABLED:-false}" = "true" ] && send_ifttt
+[ "${SNS_ENABLED:-false}" = "true" ] && send_sns
+[ "${WEBHOOK_ENABLED:-false}" = "true" ] && send_webhook
+[ "${TELEGRAM_ENABLED:-false}" = "true" ] && send_telegram
+[ "${MATRIX_ENABLED:-false}" = "true" ] && send_matrix
+[ "${SLACK_ENABLED:-false}" = "true" ] && send_slack
+[ "${NOTIFICATION_COMMAND_ENABLED:-false}" = "true" ] && send_shell
+[ "${NTFY_ENABLED:-false}" = "true" ] && send_ntfy
+
+exit 0

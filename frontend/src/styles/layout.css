@@ -1,0 +1,326 @@
+/* ============================================
+   TeslaPi Layout System
+   Responsive grid, containers, cards
+   Tesla browser viewport: ~1200x600
+   ============================================ */
+
+/* --- Container --- */
+.container {
+  width: 100%;
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--space-4);
+  padding-right: var(--space-4);
+}
+
+@media (min-width: 768px) {
+  .container {
+    padding-left: var(--space-6);
+    padding-right: var(--space-6);
+  }
+}
+
+/* --- Dashboard Grid --- */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  margin: calc(-1 * var(--space-3));
+}
+
+.dashboard-grid > * {
+  margin: var(--space-3);
+}
+
+/* Tablet: 2 columns */
+@media (min-width: 768px) {
+  .dashboard-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Desktop: 3 columns */
+@media (min-width: 1024px) {
+  .dashboard-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* Full-width card spanning all columns */
+.dashboard-grid .card--full {
+  grid-column: 1 / -1;
+}
+
+/* Two-column card */
+@media (min-width: 768px) {
+  .dashboard-grid .card--wide {
+    grid-column: span 2;
+  }
+}
+
+/* --- Card Base --- */
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-5);
+  transition: transform var(--transition-base),
+              box-shadow var(--transition-base),
+              border-color var(--transition-base);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Desktop hover lift */
+@media (hover: hover) and (min-width: 768px) {
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-card-hover);
+    border-color: var(--color-border-hover);
+  }
+}
+
+.card__header {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+
+.card__icon {
+  width: 20px;
+  height: 20px;
+  margin-right: var(--space-3);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.card__title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.card__expand-btn {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.card__expand-btn:hover {
+  color: var(--color-text);
+  background: var(--color-bg-raised);
+}
+
+.card__expand-btn svg {
+  transition: transform var(--transition-base);
+}
+
+.card__expand-btn--open svg {
+  transform: rotate(180deg);
+}
+
+.card__body {
+  /* Content area */
+}
+
+.card__expandable {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.2s ease;
+  opacity: 0;
+}
+
+.card__expandable--open {
+  max-height: 3000px;
+  opacity: 1;
+}
+
+/* --- Header / App Shell --- */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-header);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  transition: background var(--transition-slow), border-color var(--transition-slow);
+}
+
+.app-header__inner {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--space-4);
+  padding-right: var(--space-4);
+}
+
+@media (min-width: 768px) {
+  .app-header__inner {
+    height: 64px;
+    padding-left: var(--space-6);
+    padding-right: var(--space-6);
+  }
+}
+
+.app-header__title {
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+
+.app-header__title span {
+  color: var(--color-accent);
+}
+
+.app-header__actions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.app-header__actions > * + * {
+  margin-left: var(--space-1);
+}
+
+.header-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.header-btn:hover {
+  color: var(--color-text);
+  background: var(--color-card);
+}
+
+.header-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* --- Main Content --- */
+.app-main {
+  padding-top: var(--space-6);
+  padding-bottom: var(--space-12);
+  min-height: calc(100vh - 64px);
+}
+
+/* --- Toast Container --- */
+.toast-container {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+}
+
+.toast-container > * + * {
+  margin-top: var(--space-3);
+}
+
+/* --- Empty State --- */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8) var(--space-4);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.empty-state__icon {
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--space-4);
+  opacity: 0.4;
+}
+
+.empty-state__text {
+  font-size: var(--text-sm);
+}
+
+/* --- Button --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  border-radius: var(--radius-md);
+  min-height: 44px;
+  transition: background var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: white;
+}
+
+.btn--primary:hover {
+  background: var(--color-accent-hover);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.btn--ghost:hover {
+  background: var(--color-card);
+  color: var(--color-text);
+}
+
+.btn--sm {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  min-height: 36px;
+}
+
+.btn > svg {
+  width: 16px;
+  height: 16px;
+  margin-right: var(--space-2);
+}
+
+/* --- Coming Soon Page --- */
+.coming-soon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+  color: var(--color-text-muted);
+}
+
+.coming-soon h2 {
+  font-size: var(--text-2xl);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.coming-soon p {
+  font-size: var(--text-sm);
+}

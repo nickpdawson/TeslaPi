@@ -1,0 +1,26 @@
+[Unit]
+Description=TeslaPi Web Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/opt/teslapi
+ExecStart=/opt/teslapi/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8080 --workers 1 --log-level warning
+Restart=always
+RestartSec=5
+Environment=TESLAPI_DATABASE_PATH=/mutable/teslapi/teslapi.db
+Environment=TESLAPI_DEV_MODE=false
+
+# Resource limits for Pi 4
+MemoryMax=256M
+CPUQuota=50%
+
+# Security hardening (relaxed — strict mode fails when teslausb paths don't exist yet)
+ProtectHome=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

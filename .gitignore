@@ -1,0 +1,58 @@
+# Dependencies
+frontend/node_modules/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+*.pyo
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups (local only)
+backups/
+
+# Claude Code
+.claude/
+
+# Python venv
+venv/
+.venv/
+
+# SQLite databases (runtime only)
+*.db
+*.db-journal
+*.db-wal
+
+# Credentials
+*credentials*
+*.pem
+*.key
+
+# Personal config (contains WiFi passwords, server addresses)
+teslausb_setup_variables.conf
+
+# Screenshots with personal data
+Screenshots/Dashboard.png
+
+# Development logs and plans
+development_log.md
+teslapi_plan.md

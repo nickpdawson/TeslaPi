@@ -1,0 +1,11 @@
+#!/bin/bash
+
+echo "Making root partition writeable"
+mount / -o remount,rw
+
+if findmnt /teslausb > /dev/null
+then
+  echo "Making boot/firmware partition writeable"
+  mount /teslausb -o remount,rw
+fi
+echo "Done. Make any changes needed, and reboot the Pi when ready."

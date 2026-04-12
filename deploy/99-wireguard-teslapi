@@ -1,0 +1,80 @@
+#!/bin/bash
+# /etc/NetworkManager/dispatcher.d/99-wireguard-teslapi
+# Auto-manage WireGuard tunnel based on WiFi network.
+#
+# When the Pi connects to a non-home WiFi network (e.g. a mobile hotspot),
+# this script brings up the WireGuard tunnel so it can reach home resources
+# (NAS for archiving, Home Assistant, etc.).  When it reconnects to the home
+# network the tunnel is brought down to avoid unnecessary double-routing.
+#
+# Managed by TeslaPi -- see backend/services/wireguard_manager.py
+
+INTERFACE="$1"
+ACTION="$2"
+WG_INTERFACE="wg-teslapi"
+CONFIG_FILE="/mutable/teslapi/wireguard-auto.conf"
+LOG_TAG="teslapi-wg-dispatcher"
+
+log() {
+    logger -t "$LOG_TAG" "$*"
+}
+
+# Only act on WiFi interface events
+[[ "$INTERFACE" != wlan* ]] && exit 0
+[[ "$ACTION" != "up" && "$ACTION" != "down" ]] && exit 0
+
+# Read config
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    log "Config file $CONFIG_FILE not found, skipping"
+    exit 0
+fi
+source "$CONFIG_FILE"
+# Expected vars: ENABLED, HOME_SSID, ONLY_NON_HOME
+
+if [[ "$ENABLED" != "true" ]]; then
+    log "Auto-connect disabled, skipping"
+    exit 0
+fi
+
+# Check if WireGuard config exists
+if [[ ! -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
+    log "WireGuard config /etc/wireguard/${WG_INTERFACE}.conf not found, skipping"
+    exit 0
+fi
+
+CURRENT_SSID=$(nmcli -t -f GENERAL.CONNECTION device show "$INTERFACE" 2>/dev/null | cut -d: -f2)
+
+if [[ "$ACTION" == "up" ]]; then
+    log "WiFi up on $INTERFACE, SSID='$CURRENT_SSID'"
+
+    if [[ "$ONLY_NON_HOME" == "true" && "$CURRENT_SSID" == "$HOME_SSID" ]]; then
+        # On home network -- bring down WG if it is running
+        if ip link show "$WG_INTERFACE" &>/dev/null; then
+            log "Home network detected, bringing down $WG_INTERFACE"
+            wg-quick down "$WG_INTERFACE" 2>/dev/null
+        else
+            log "Home network detected, $WG_INTERFACE already down"
+        fi
+    else
+        # Not home (or unconditional mode) -- bring up WG
+        if ip link show "$WG_INTERFACE" &>/dev/null; then
+            log "Non-home network, $WG_INTERFACE already up"
+        else
+            log "Non-home network detected, bringing up $WG_INTERFACE"
+            wg-quick up "$WG_INTERFACE" 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                log "$WG_INTERFACE is now up"
+            else
+                log "Failed to bring up $WG_INTERFACE"
+            fi
+        fi
+    fi
+
+elif [[ "$ACTION" == "down" ]]; then
+    log "WiFi down on $INTERFACE"
+    # WiFi went down -- bring down WG too (no point keeping it up with no transport)
+    if ip link show "$WG_INTERFACE" &>/dev/null; then
+        log "Bringing down $WG_INTERFACE (WiFi lost)"
+        wg-quick down "$WG_INTERFACE" 2>/dev/null
+    fi
+fi

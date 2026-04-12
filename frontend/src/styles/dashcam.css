@@ -1,0 +1,765 @@
+/* ============================================
+   TeslaPi Dashcam Viewer Styles
+   Dark viewer area, synchronized multi-camera grid
+   ============================================ */
+
+/* --- Page Layout --- */
+.dashcam-page {
+  display: flex;
+  height: calc(100vh - 60px);
+  overflow: hidden;
+}
+
+.dashcam-sidebar {
+  width: 320px;
+  min-width: 320px;
+  background: var(--color-bg-raised);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dashcam-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* --- Mobile tabs --- */
+.dashcam-mobile-tabs {
+  display: none;
+  background: var(--color-bg-raised);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dashcam-mobile-tabs button {
+  flex: 1;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  min-height: 44px;
+  min-width: auto;
+}
+
+.dashcam-mobile-tabs button.active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+/* --- Event List --- */
+.event-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.event-list-header {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.event-list-header h2 {
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-3);
+}
+
+.event-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.event-filter-bar > * + * {
+  margin-left: var(--space-2);
+}
+
+.event-filter-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  border-radius: var(--radius-full);
+  background: var(--color-card);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  transition: all var(--transition-fast);
+  min-height: 32px;
+  min-width: auto;
+}
+
+.event-filter-btn:hover {
+  background: var(--color-card-hover);
+  color: var(--color-text);
+}
+
+.event-filter-btn.active {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.event-date-group {
+  margin-top: var(--space-3);
+}
+
+.event-date-label {
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: var(--space-1) var(--space-2);
+}
+
+.event-item {
+  display: flex;
+  align-items: center;
+  padding: var(--space-3);
+  margin-top: var(--space-1);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  min-height: 44px;
+}
+
+.event-item:hover {
+  background: var(--color-card-hover);
+}
+
+.event-item.active {
+  background: var(--color-accent-glow);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.event-type-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-lg);
+  flex-shrink: 0;
+}
+
+.event-type-icon.sentry {
+  background: var(--color-error-glow);
+  color: var(--color-error);
+}
+
+.event-type-icon.saved {
+  background: var(--color-accent-glow);
+  color: var(--color-accent);
+}
+
+.event-type-icon.recent {
+  background: var(--color-success-glow);
+  color: var(--color-success);
+}
+
+.event-type-icon.track {
+  background: var(--color-warning-glow);
+  color: var(--color-warning);
+}
+
+.event-info {
+  margin-left: var(--space-3);
+  flex: 1;
+  min-width: 0;
+}
+
+.event-time {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text);
+}
+
+.event-meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+}
+
+.event-meta > * + * {
+  margin-left: var(--space-2);
+}
+
+.event-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.event-badge.archived {
+  background: var(--color-success-glow);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: var(--color-success);
+}
+
+/* --- Video Grid Layouts --- */
+.video-grid-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  padding: var(--space-1);
+}
+
+.video-grid-container > * + * {
+  /* fallback gap via margin not needed for grid children */
+}
+
+/* Grid 2x3 */
+.video-grid-container.layout-grid-2x3 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: 2px;
+}
+
+/* Grid 3x2 */
+.video-grid-container.layout-grid-3x2 {
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 2px;
+}
+
+/* Front Focus: big front on top, others in row below */
+.video-grid-container.layout-front-focus {
+  grid-template-columns: 1fr;
+  grid-template-rows: 2fr 1fr;
+  gap: 2px;
+}
+
+.video-grid-container.layout-front-focus .video-cell:first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.video-grid-container.layout-front-focus .video-thumbnails-row {
+  grid-column: 1;
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 2px;
+}
+
+/* Single camera */
+.video-grid-container.layout-single {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+/* Side by side */
+.video-grid-container.layout-side-by-side {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+  gap: 2px;
+}
+
+/* Picture in picture */
+.video-grid-container.layout-picture-in-picture {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.video-grid-container.layout-picture-in-picture .video-cell.pip-main {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.video-grid-container.layout-picture-in-picture .video-cell.pip-overlay {
+  position: absolute;
+  bottom: 80px;
+  right: 16px;
+  width: 240px;
+  height: 135px;
+  z-index: 10;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* --- Video Cell --- */
+.video-cell {
+  position: relative;
+  background: #111;
+  overflow: hidden;
+  border-radius: 2px;
+}
+
+.video-cell video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+
+.video-cell-label {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-medium);
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.5);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.video-cell-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+}
+
+.video-cell-loading .spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: rgba(255, 255, 255, 0.6);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.video-cell-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.2);
+  font-size: var(--text-sm);
+}
+
+.video-cell-click-target {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+
+/* --- Timeline --- */
+.dashcam-timeline {
+  padding: var(--space-2) var(--space-4);
+  background: rgba(0, 0, 0, 0.9);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.timeline-bar-container {
+  position: relative;
+  height: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.timeline-bar-track {
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  position: relative;
+  overflow: visible;
+}
+
+.timeline-bar-container:hover .timeline-bar-track {
+  height: 6px;
+}
+
+.timeline-bar-progress {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 2px;
+  position: relative;
+  transition: width 0.1s linear;
+}
+
+.timeline-bar-progress::after {
+  content: '';
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  background: var(--color-accent);
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.timeline-bar-container:hover .timeline-bar-progress::after {
+  opacity: 1;
+}
+
+.timeline-clip-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.timeline-sentry-marker {
+  position: absolute;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+  background: var(--color-error);
+  border-radius: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+}
+
+.timeline-time {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--space-1);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* --- Playback Controls --- */
+.playback-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2) var(--space-4);
+  background: rgba(0, 0, 0, 0.9);
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.playback-controls > * + * {
+  margin-left: var(--space-2);
+}
+
+.playback-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  min-width: 40px;
+  border-radius: var(--radius-full);
+  color: rgba(255, 255, 255, 0.7);
+  background: none;
+  border: none;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.playback-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.playback-btn.primary {
+  width: 48px;
+  height: 48px;
+  min-height: 48px;
+  min-width: 48px;
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.playback-btn.primary:hover {
+  background: var(--color-accent-hover);
+}
+
+.playback-speed-select {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  min-height: 32px;
+  min-width: 60px;
+  cursor: pointer;
+}
+
+.playback-speed-select:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.playback-speed-select option {
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.controls-spacer {
+  flex: 1;
+}
+
+/* --- Layout Selector --- */
+.layout-selector {
+  display: flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.layout-selector > * + * {
+  margin-left: var(--space-2);
+}
+
+.layout-selector-label {
+  font-size: var(--text-xs);
+  color: rgba(255, 255, 255, 0.4);
+  margin-right: var(--space-2);
+  white-space: nowrap;
+}
+
+.layout-option {
+  width: 36px;
+  height: 24px;
+  min-height: 24px;
+  min-width: 36px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  transition: all var(--transition-fast);
+}
+
+.layout-option:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.layout-option.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-glow);
+}
+
+/* Layout option mini-grid thumbnails */
+.layout-option .lo-cell {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 1px;
+}
+
+.layout-option.active .lo-cell {
+  background: var(--color-accent);
+}
+
+/* grid-2x3: 2 cols, 3 rows */
+.layout-option.lo-grid-2x3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: 1px;
+}
+
+/* grid-3x2: 3 cols, 2 rows */
+.layout-option.lo-grid-3x2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+}
+
+/* front-focus: big top, small row below */
+.layout-option.lo-front-focus {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 2fr 1fr;
+  gap: 1px;
+}
+
+.layout-option.lo-front-focus .lo-cell:first-child {
+  grid-column: 1;
+}
+
+/* single */
+.layout-option.lo-single {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+/* side-by-side */
+.layout-option.lo-side-by-side {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+  gap: 1px;
+}
+
+/* pip */
+.layout-option.lo-pip {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  position: relative;
+}
+
+.layout-option.lo-pip .lo-pip-small {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 10px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.4);
+  border-radius: 1px;
+}
+
+.layout-option.active .lo-pip-small {
+  background: var(--color-accent);
+}
+
+/* --- No Event Selected State --- */
+.dashcam-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.3);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+.dashcam-empty-state-icon {
+  font-size: 48px;
+  margin-bottom: var(--space-4);
+  opacity: 0.5;
+}
+
+.dashcam-empty-state p {
+  font-size: var(--text-sm);
+  max-width: 300px;
+}
+
+/* --- Camera Selector (single/side-by-side modes) --- */
+.camera-selector {
+  display: flex;
+  padding: var(--space-1) var(--space-4);
+  background: rgba(0, 0, 0, 0.85);
+  overflow-x: auto;
+}
+
+.camera-selector > * + * {
+  margin-left: var(--space-1);
+}
+
+.camera-selector-btn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.5);
+  background: none;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+  min-height: 32px;
+  min-width: auto;
+}
+
+.camera-selector-btn:hover {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.camera-selector-btn.active {
+  color: #fff;
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+/* --- Responsive --- */
+@media (max-width: 768px) {
+  .dashcam-page {
+    flex-direction: column;
+    height: calc(100vh - 56px);
+  }
+
+  .dashcam-sidebar {
+    width: 100%;
+    min-width: 100%;
+    max-height: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .dashcam-sidebar.hidden-mobile {
+    display: none;
+  }
+
+  .dashcam-main.hidden-mobile {
+    display: none;
+  }
+
+  .dashcam-mobile-tabs {
+    display: flex;
+  }
+
+  .video-grid-container.layout-grid-2x3,
+  .video-grid-container.layout-grid-3x2 {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  .video-grid-container.layout-front-focus {
+    grid-template-rows: 1fr;
+  }
+
+  .video-grid-container.layout-front-focus .video-thumbnails-row {
+    display: none;
+  }
+
+  .video-grid-container.layout-side-by-side {
+    grid-template-columns: 1fr;
+  }
+
+  .video-grid-container.layout-picture-in-picture .video-cell.pip-overlay {
+    width: 140px;
+    height: 79px;
+    bottom: 60px;
+    right: 8px;
+  }
+
+  .layout-selector {
+    overflow-x: auto;
+  }
+
+  .playback-controls {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .playback-btn {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  .playback-btn.primary {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
