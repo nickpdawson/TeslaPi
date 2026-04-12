@@ -52,7 +52,8 @@ class DashcamEvent(BaseModel):
     type: str = ""
     path: str = ""
     size_bytes: int = 0
-    camera: str = ""
+    cameras: list[str] = Field(default_factory=list)
+    archived: bool = True
 
 
 class ArchiveStatus(BaseModel):

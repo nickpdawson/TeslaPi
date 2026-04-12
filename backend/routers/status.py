@@ -78,21 +78,21 @@ def _mock_status() -> TeslaPiStatus:
                 type="sentry",
                 path="/TeslaCam/SentryClips/2026-04-09_14-34-00",
                 size_bytes=524_288_000,
-                camera="front",
+                cameras=["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"],
             ),
             DashcamEvent(
                 timestamp=datetime(2026, 4, 9, 11, 15, 0, tzinfo=timezone.utc),
                 type="saved",
                 path="/TeslaCam/SavedClips/2026-04-09_11-15-00",
                 size_bytes=1_073_741_824,
-                camera="front",
+                cameras=["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"],
             ),
             DashcamEvent(
                 timestamp=datetime(2026, 4, 8, 21, 42, 0, tzinfo=timezone.utc),
                 type="sentry",
                 path="/TeslaCam/SentryClips/2026-04-08_21-42-00",
                 size_bytes=262_144_000,
-                camera="front",
+                cameras=["front", "back", "left_repeater", "right_repeater", "left_pillar", "right_pillar"],
             ),
         ],
         archive=ArchiveStatus(
@@ -335,20 +335,40 @@ async def _read_dashcam_events() -> list[DashcamEvent]:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 
+            # Group clips by event (event_type + event_dir)
             async with db.execute(
-                """SELECT event_type, event_dir, clip_file, size_bytes, archived_at
+                """SELECT event_type, event_dir,
+                          GROUP_CONCAT(clip_file) as clip_files,
+                          COUNT(*) as clip_count,
+                          SUM(size_bytes) as total_size,
+                          MAX(archived_at) as archived_at
                    FROM dashcam_archived_clips
+                   GROUP BY event_type, event_dir
                    ORDER BY archived_at DESC
                    LIMIT 10"""
             ) as cursor:
                 async for row in cursor:
-                    clip = dict(row)
+                    event = dict(row)
+                    # Extract camera names from clip filenames
+                    # e.g., "2026-04-12_09-57-58-front.mp4" → "front"
+                    cameras = []
+                    for clip_file in (event.get("clip_files", "") or "").split(","):
+                        parts = clip_file.rsplit("-", 1)
+                        if len(parts) == 2:
+                            cam = parts[1].replace(".mp4", "").strip()
+                            if cam and cam not in cameras:
+                                cameras.append(cam)
+
+                    event_type = event.get("event_type", "saved")
+                    # Map DB types to display types
+                    display_type = "sentry" if "sentry" in event_type.lower() else "saved"
+
                     events.append(DashcamEvent(
-                        timestamp=clip.get("archived_at"),
-                        type=clip.get("event_type", "saved"),
-                        path=f"/TeslaCam/{clip.get('event_type', '')}/{clip.get('event_dir', '')}/{clip.get('clip_file', '')}",
-                        size_bytes=clip.get("size_bytes", 0),
-                        camera="front",
+                        timestamp=event.get("archived_at"),
+                        type=display_type,
+                        path=f"/TeslaCam/{event_type}/{event.get('event_dir', '')}",
+                        size_bytes=event.get("total_size", 0),
+                        cameras=cameras,
                     ))
     except Exception as exc:
         logger.warning("Failed to read dashcam events: %s", exc)
