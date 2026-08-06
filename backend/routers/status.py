@@ -375,7 +375,7 @@ async def _read_music_status() -> MusicSyncStatus:
                         music.sync_in_progress = True
                         music.current_job_id = job.get("id")
                     if job.get("completed_at"):
-                        music.last_sync_at = job["completed_at"]
+                        music.last_sync_at = _parse_db_timestamp(job["completed_at"])
     except Exception as exc:
         logger.warning("Failed to read music status: %s", exc)
 
@@ -425,7 +425,7 @@ async def _read_dashcam_events() -> list[DashcamEvent]:
                     display_type = "sentry" if "sentry" in event_type.lower() else "saved"
 
                     events.append(DashcamEvent(
-                        timestamp=event.get("archived_at"),
+                        timestamp=_parse_db_timestamp(event.get("archived_at")),
                         type=display_type,
                         path=f"/TeslaCam/{event_type}/{event.get('event_dir', '')}",
                         size_bytes=event.get("total_size", 0),
