@@ -1513,3 +1513,21 @@ Findings:
 Method note for future: loop-mount the backing image `mount -o ro,loop /backingfiles/music_disk.bin /tmp/x` to verify sync results physically — read-only, safe (two readers), and the definitive check that API success actually reached the drive. rsync `-a` mtime preservation means "recency of files on the drive" is NOT a valid freshness signal; verify by presence/absence of a known-new album instead.
 
 Primary directive remains DONE — now proven at the physical-drive level, not just the API. Awaiting user's share de-dupe; will re-index + re-validate after.
+
+### Iteration 71 — Phase 2 (gadget & filesystem integrity): 2b + 2g fixed, 2f verified
+
+With the primary sync goal done+verified, moved to Phase 2. Read the plan; several items were already resolved earlier this session (2d rsync partial codes, 2e crash recovery via reconcile_interrupted_jobs, 2f concurrent-guard). Fixed the two remaining clean, code-level items:
+
+**2b (H7) — /api/gadget/toggle called uninstalled scripts.** `gadget.py:64` ran relative `run/enable_gadget.sh` — the inherited teslausb gadget scripts (gadget name `teslausb`, sources `/root/bin/envsetup.sh`), which neither build.sh nor install.sh copies under /opt/teslapi → the endpoint failed 100% on a real device. Repointed to the installed, proven `/opt/teslapi/deploy/teslapi-gadget-{enable,disable}.sh` (gadget name `teslapi`) that the sync path (music_sync.GADGET_*) and customization.py already use — unifying on one gadget implementation (partial 2a). Verified the scripts exist + are executable on the Pi; did NOT toggle the live gadget (would disconnect the car).
+
+**2g (M-B1) — idle unmount raced active sync.** The 5-min browse idle-unmount (`_schedule_unmount`) and a sync use the SAME mountpoint (`music_sync.SHARE_MOUNT == MUSIC_SHARE_MOUNT == /mnt/music_share`); it did `umount -l` without checking for an active sync → could lazy-detach the source from under a running rsync. Now defers while `music_sync._active_sync` is claimed (pushes the idle window forward each cycle). Extracted `_should_unmount_idle(elapsed, sync_active)` as a mutation-tested predicate.
+
+**2f verified done** — start_sync claims the slot synchronously (check line 56 → claim line 69, no await between; indexing check is sync). Race-safe.
+
+Tests: `test_music_router.py` added (idle-unmount safety predicate; gadget-toggle uses installed paths + agrees with sync path). Backend **78 passing** (was 76), deterministic 3×. Deployed version 20260806-181350.
+
+**Phase 2 remaining (higher-risk, defer for careful hardware testing):**
+- 2a: teslapi-gadget-disable.sh does `echo "" > UDC ... || true` but never VERIFIES the UDC unbound — a silent failure would tear down while the car still binds the drive. Add a post-write UDC-empty check that exits non-zero, and confirm music_sync checks the disable rc before mounting the image RW. Corruption-critical — test on the Pi with a real sync before/after.
+- 2c: dashcam archive lifecycle (ro,loop mount called "safe" while gadget active; delete_after rm on a ro mount; hardcoded cifs share_type; _active_archive["process"] never set so cancel is a no-op; TeslaCam Saved/Sentry vs {event_type} layout mismatch).
+
+Next iteration: 2a (with hardware test) or 2c, or broaden Phase 7 coverage. User is de-duping the share in the background; will re-index + re-validate music when they signal done.
