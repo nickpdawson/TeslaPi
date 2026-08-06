@@ -24,6 +24,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _parse_db_timestamp(value) -> datetime | None:
+    """Coerce a DB timestamp into a datetime for datetime-typed response fields.
+
+    SQLite hands back TIMESTAMP columns as strings in two shapes: 'CURRENT_TIMESTAMP'
+    writes '2026-08-06 16:23:55' (space, naive) while Python-written ISO values look
+    like '2026-08-06T16:22:28.104994+00:00'. Assigning either raw string to a
+    `datetime`-typed pydantic field produces a serialization-mismatch warning AND
+    breaks consumers that call `.isoformat()` on it (e.g. the HA push loop). Parse
+    both forms here; pass through an existing datetime; return None on anything
+    unparseable rather than raising.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace(" ", "T", 1))
+        except ValueError:
+            logger.debug("Unparseable DB timestamp: %r", value)
+            return None
+    return None
+
+
 def _mock_status() -> TeslaPiStatus:
     """Return realistic mock data for dev mode."""
     return TeslaPiStatus(
@@ -468,7 +490,7 @@ async def get_status() -> TeslaPiStatus:
     latest_job = archive_data.get("latest_job")
     if latest_job:
         if latest_job.get("completed_at"):
-            archive.last_archive_at = latest_job["completed_at"]
+            archive.last_archive_at = _parse_db_timestamp(latest_job["completed_at"])
         archive.last_archive_clips = archive_data.get("total_clips", 0)
         archive.last_archive_bytes = archive_data.get("total_bytes", 0)
 
