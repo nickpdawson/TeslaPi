@@ -177,13 +177,40 @@ See the [Development](#development) section below.
 
 ### Updating
 
-The installer is idempotent. To update an existing installation:
+The installer is idempotent and your data on `/mutable/teslapi/` (database, config,
+drives.json) persists across every update. Pick whichever path fits:
+
+**Option A — In-app updater (easiest).** Open **Settings → System / Updates** in the
+web UI. TeslaPi checks the GitHub releases API, shows the latest version and its
+changelog, and applies it on request. The updater backs up the current install first
+and automatically rolls back if the new version fails to come up.
+
+**Option B — Deploy from a dev machine.** Builds from source and pushes over SSH:
 
 ```bash
-./deploy/deploy-to-pi.sh <pi-ip>
+git clone https://github.com/nickpdawson/TeslaPi.git   # or: git pull
+cd TeslaPi
+./deploy/deploy-to-pi.sh <pi-ip-or-hostname>
 ```
 
-The database and state on `/mutable/teslapi/` persist across updates.
+**Option C — Manual, on the Pi.** Download a release tarball and run the update helper
+(it backs up, extracts, runs the installer, and rolls back on failure):
+
+```bash
+curl -L -o /tmp/teslapi.tar.gz \
+  https://github.com/nickpdawson/TeslaPi/releases/latest/download/teslapi.tar.gz
+sudo bash deploy/update.sh /tmp/teslapi.tar.gz /tmp/teslapi-backup
+# or, if you don't have the repo on the Pi, extract and run install.sh directly:
+#   cd /tmp && tar xzf teslapi.tar.gz && sudo bash teslapi/install.sh
+```
+
+Any path only restarts `teslapi.service` and `nginx`; the USB gadget and the teslausb
+`archiveloop` daemon are left untouched, so an update never interrupts dashcam
+recording or disconnects the car's drives. After updating, confirm the running version:
+
+```bash
+curl -s http://<pi-ip>/api/health   # {"status":"ok","version":"0.2.0",...}
+```
 
 ## Configuration
 

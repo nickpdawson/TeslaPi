@@ -37,11 +37,19 @@ cp "$PROJECT_DIR/deploy/teslapi-gadget-enable.sh" "$BUILD_DIR/teslapi/"
 cp "$PROJECT_DIR/deploy/teslapi-gadget-disable.sh" "$BUILD_DIR/teslapi/"
 cp "$PROJECT_DIR/pyproject.toml" "$BUILD_DIR/teslapi/"
 
-# Create version file
-echo "$(date -u +%Y%m%d-%H%M%S)" > "$BUILD_DIR/teslapi/VERSION"
+# Create version file. Line 1 MUST be the semver (pyproject is the source of truth):
+# the in-app updater reads line 1 and compares it against the GitHub release tag as
+# semver, so a date string here breaks update detection. Line 2 = short commit, line
+# 3 = build timestamp (informational).
+SEMVER="$(grep -m1 '^version' "$PROJECT_DIR/pyproject.toml" | cut -d'"' -f2)"
+: "${SEMVER:=0.0.0}"
+echo "$SEMVER" > "$BUILD_DIR/teslapi/VERSION"
 if command -v git &>/dev/null && [ -d "$PROJECT_DIR/.git" ]; then
     git -C "$PROJECT_DIR" rev-parse --short HEAD >> "$BUILD_DIR/teslapi/VERSION"
+else
+    echo "unknown" >> "$BUILD_DIR/teslapi/VERSION"
 fi
+date -u +%Y%m%d-%H%M%S >> "$BUILD_DIR/teslapi/VERSION"
 
 # Create tarball
 echo "--- Creating archive ---"
