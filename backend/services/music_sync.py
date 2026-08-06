@@ -251,7 +251,16 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
                                     (path,),
                                 )
                             await db.commit()
-                        await _update_job(db_path, job_id, status="completed")
+                        # Pin files_copied to the real transferred-file count. The live
+                        # counter is derived from rsync's to-chk total, which also counts
+                        # the directories rsync creates (e.g. Artist/, Album/), so it can
+                        # overshoot the file count and render >100% in the UI. On full
+                        # success the intended file count is exactly len(file_list).
+                        await _update_job(
+                            db_path, job_id,
+                            status="completed",
+                            files_copied=len(file_list),
+                        )
                     else:
                         # Partial transfer (rsync 23/24): some files did not copy.
                         # Report it honestly as "partial", not "completed", and leave
