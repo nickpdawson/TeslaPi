@@ -1482,3 +1482,20 @@ The user chose "small test sync first." Triggered a selective sync of `/Alizée/
 **Fix: re-index against the current share, then sync.** The re-index is read-only w.r.t. the drive/gadget (walks the share, updates the DB) — safe to run. Triggered `POST /api/music/library/index` (walking 2191 artist dirs; slow over WAN CIFS). Next: when indexing completes, re-run a small selective sync to prove end-to-end success on real, current paths, then report the ~backfill scope to the user.
 
 No code change this iteration — the finding is operational (stale data + a source-side reorg), and the sync engine behaved correctly (failed safe, reported "partial" honestly, re-enabled the gadget). Tests remain 76 backend + 36 frontend = 112.
+
+### Iteration 69 — music sync VALIDATED end-to-end on hardware; re-index done; files_copied counter fixed
+
+Woke to find the re-index (iter 68) complete. It confirmed the diagnosis dramatically:
+- OLD index (04-10, pre-reorg): 13776 tracks / 336 GB / 2196 artists.
+- NEW index (current share): **77931 tracks / 2.64 TB / 2115 artists / 6883 albums.** The 04-21 reorg was a dedup pass that exploded every track into numbered copies (`01 - Kryptonite.1.mp3 … .13.mp3`), so the live share is ~2.6 TB of heavy duplication. (Source-side data problem for the user to clean up — not a TeslaPi bug. Note: 2.6 TB will NOT fit on the Tesla music drive, so a blind "full" sync is not viable; selective syncing or de-duping the share first is required.)
+
+**Music sync now works end-to-end (proven on hardware, twice):**
+- `/Baltimora/Tarzan Boy` (2 files) → status `completed`, 8,001,312 bytes, no error.
+- `/Sam Cooke/The Man Who Invented Soul` (3 files) → `completed`, files_copied 3/3, 10,816,024 bytes.
+The full fix chain is validated: reconcile the stuck job (iter 66) → re-index against the current share → selective sync succeeds on real paths. This closes the primary directive: music sync is working and resilient, video (dashcam auto-archive) verified working in iter 67.
+
+**Bug found + fixed during validation (Phase 0):** the first successful sync reported `files_copied 4 / files_total 2` — rsync `--info=progress2` `to-chk` totals count the directories rsync creates (`Baltimora/`, `Tarzan Boy/`) alongside files, so the live counter overshoots and would render >100% in the UI (bytes were correct — dirs are 0 bytes). Fixed: on full selective success, pin `files_copied = len(file_list)` (the exact intended file count). Deployed (version 20260806-173812) and re-verified: the Sam Cooke sync reported a correct `3/3`.
+
+**State of the primary goal:** DONE and hardware-verified. Music + video sync both work; the resilience engine (mount-safety, stall/retry, exit-code policy, reconciliation) is hardened and unit-covered (76 backend + 36 frontend = 112 tests). Remaining music item is operational, not code: the user must decide how to handle the 2.6 TB duplicated share (selective sync vs de-dupe the source) — the drive can't hold it all. Committed: 95f184e (counter), plus iter 66–68 fixes all deployed.
+
+Next loop iterations: proceed through the remaining plan phases that don't need the user or a browser — Phase 2 (gadget-system unification / toggle-calls-uninstalled-scripts), Phase 3 (provisioning), and broaden Phase 7 test coverage. Phase 1 (auth model) needs a user decision; Phase 6 visual polish needs a browser.
