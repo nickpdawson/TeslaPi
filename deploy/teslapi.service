@@ -11,7 +11,10 @@ Type=exec
 User=root
 Group=root
 WorkingDirectory=/opt/teslapi
-ExecStart=/opt/teslapi/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8080 --workers 1 --log-level warning
+# Bind to loopback only — nginx (same host) proxies to 127.0.0.1:8080 and is the sole
+# public listener (SOL-001). Binding 0.0.0.0 exposed the API directly on :8080,
+# bypassing nginx and any front-door controls.
+ExecStart=/opt/teslapi/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8080 --workers 1 --log-level warning
 Restart=always
 RestartSec=5
 Environment=TESLAPI_DATABASE_PATH=/mutable/teslapi/teslapi.db
