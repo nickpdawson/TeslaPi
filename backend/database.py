@@ -167,6 +167,31 @@ async def init_db() -> None:
     logger.info("Database initialized at %s", db_path)
 
 
+async def reconcile_interrupted_jobs() -> int:
+    """Mark orphaned sync/archive jobs interrupted at startup.
+
+    A job is only genuinely 'running'/'pending' while its owning process is alive;
+    the in-memory _active_sync/_active_archive claims never survive a restart. So any
+    such row found at startup was orphaned by a crash or restart — left as-is it pins
+    the dashboard on 'syncing' forever and hides the real (idle) state. Mark them
+    'interrupted' (neither running nor a hard failure) so status is truthful and new
+    syncs aren't masked. Returns the number of rows reconciled.
+    """
+    total = 0
+    async with get_db() as db:
+        for table in ("music_sync_jobs", "dashcam_archive_jobs"):
+            cursor = await db.execute(
+                f"UPDATE {table} SET status = 'interrupted', "
+                f"error_message = COALESCE(error_message, 'Interrupted (service restarted while running)'), "
+                f"completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) "
+                f"WHERE status IN ('running', 'pending')"
+            )
+            total += cursor.rowcount or 0
+    if total:
+        logger.warning("Reconciled %d orphaned running/pending job(s) to 'interrupted'", total)
+    return total
+
+
 @asynccontextmanager
 async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
     """Async context manager yielding a database connection with WAL mode."""

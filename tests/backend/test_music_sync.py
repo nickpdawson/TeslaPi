@@ -187,3 +187,38 @@ def test_classify_rsync_exit_policy():
     assert _classify_rsync_exit(1) == "retry"
     assert _classify_rsync_exit(255) == "retry"
     assert _classify_rsync_exit(None) == "retry"
+
+
+async def test_reconcile_interrupted_jobs(monkeypatch, tmp_path):
+    # ROOT CAUSE of "no music synced in months": a sync orphaned by a crash/restart
+    # stayed status='running' forever, pinning the dashboard on "syncing". Startup
+    # reconciliation must mark orphaned running/pending jobs 'interrupted'.
+    import sqlite3
+    from backend.config import settings
+    from backend import database
+
+    dbp = str(tmp_path / "recon.db")
+    monkeypatch.setattr(settings, "database_path", dbp)
+    await database.init_db()
+
+    con = sqlite3.connect(dbp)
+    con.execute("INSERT INTO music_sync_jobs (status, mode, started_at) VALUES ('running','full','2026-05-08')")
+    con.execute("INSERT INTO music_sync_jobs (status, mode) VALUES ('pending','new')")
+    con.execute("INSERT INTO music_sync_jobs (status, mode, completed_at) VALUES ('completed','full','2026-05-01')")
+    con.execute("INSERT INTO dashcam_archive_jobs (status, trigger) VALUES ('running','auto')")
+    con.commit()
+    con.close()
+
+    n = await database.reconcile_interrupted_jobs()
+    assert n == 3  # 2 orphaned music (running+pending) + 1 dashcam; completed untouched
+
+    con = sqlite3.connect(dbp)
+    con.row_factory = sqlite3.Row
+    music = sorted(r["status"] for r in con.execute("SELECT status FROM music_sync_jobs"))
+    dc = [r["status"] for r in con.execute("SELECT status FROM dashcam_archive_jobs")]
+    con.close()
+    assert music == ["completed", "interrupted", "interrupted"]  # completed preserved
+    assert dc == ["interrupted"]
+
+    # Idempotent — a second startup reconciles nothing (no running/pending left).
+    assert await database.reconcile_interrupted_jobs() == 0

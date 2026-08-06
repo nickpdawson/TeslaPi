@@ -55,6 +55,12 @@ async def lifespan(app: FastAPI):
     )
     await init_db()
 
+    # Reconcile jobs left 'running'/'pending' by a prior crash or restart — no sync
+    # process survives a restart, so such rows are orphaned and would otherwise pin
+    # the dashboard on "syncing" forever (and mask that the drive is actually idle).
+    from backend.database import reconcile_interrupted_jobs
+    await reconcile_interrupted_jobs()
+
     # Start auto-sync background loop
     from backend.services import auto_sync as _auto_sync
 
