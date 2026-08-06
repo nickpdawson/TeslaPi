@@ -1,7 +1,6 @@
 """Configuration management endpoints."""
 
 import logging
-import re
 
 from fastapi import APIRouter, HTTPException
 
@@ -12,11 +11,10 @@ from backend.services import config_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/config")
 
-# Keys whose values should be masked in non-raw responses
-_SENSITIVE_KEYS = re.compile(
-    r"(password|passwd|secret|token|key|credential)", re.IGNORECASE
-)
-_MASK = "********"
+# Centralized in config_manager so config read, setup read, and config write all
+# agree on which keys are secret and on the mask placeholder.
+_SENSITIVE_KEYS = config_manager.SENSITIVE_KEY_RE
+_MASK = config_manager.MASK
 
 
 def _sanitize(config: dict[str, str]) -> dict[str, str]:

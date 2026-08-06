@@ -152,14 +152,30 @@ class NetworkManager:
                     elif "autoconnect:" in dline and "priority" not in dline:
                         auto_connect = dline.split(":")[-1].strip().lower() == "yes"
 
+            is_active = active.lower() == "yes"
+            dev = device if device and device != "--" else None
+
+            # Populate the IP for the ACTIVE connection (otherwise the UI's IP column
+            # is always blank — the WiFiConnection was constructed without it before).
+            ip_address: str | None = None
+            if is_active and dev:
+                ipres = await script_runner.run(
+                    "nmcli", ["-g", "IP4.ADDRESS", "device", "show", dev], timeout=5,
+                )
+                if ipres.returncode == 0 and ipres.stdout.strip():
+                    # e.g. "192.168.1.5/24" (possibly multiple lines) — first, no CIDR
+                    first = ipres.stdout.strip().splitlines()[0]
+                    ip_address = first.split("/")[0] or None
+
             connections.append(
                 WiFiConnection(
                     ssid=name,
                     uuid=uuid,
                     priority=priority,
                     auto_connect=auto_connect,
-                    active=active.lower() == "yes",
-                    device=device if device and device != "--" else None,
+                    active=is_active,
+                    device=dev,
+                    ip_address=ip_address,
                 )
             )
 

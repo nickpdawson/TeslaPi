@@ -32,7 +32,10 @@ fi
 
 # Remount root filesystem as read-write if needed
 ROOT_RO=false
-if mount | grep 'on / ' | grep -q 'ro,\|ro)'; then
+# Match `ro` only as a standalone mount option, not the `ro` inside `errors=remount-ro`
+# (present on every normal rw ext4 root) — the old 'ro,\|ro)' false-positived and then
+# remounted a healthy system read-only on exit.
+if mount | grep 'on / ' | grep -qE '\(ro[,)]|,ro[,)]'; then
     log "Root filesystem is read-only, remounting read-write..."
     mount -o remount,rw /
     ROOT_RO=true
@@ -64,8 +67,11 @@ log "Creating directories..."
 mkdir -p /opt/teslapi
 mkdir -p /var/www/teslapi
 
-# Use /mutable/teslapi if available, fall back to /var/lib/teslapi
-if mountpoint -q /mutable 2>/dev/null || [[ -d /mutable ]]; then
+# Use /mutable/teslapi only if /mutable is a REAL mountpoint. The old `|| [[ -d /mutable ]]`
+# took this branch when /mutable was just a bare directory on the rootfs (before its
+# partition mounts), writing the DB to the rootfs — which then gets shadowed the moment
+# the real /mutable partition mounts (data lost, rootfs fills). Require a true mount.
+if mountpoint -q /mutable 2>/dev/null; then
     mkdir -p /mutable/teslapi
 else
     warn "/mutable not mounted yet — using /var/lib/teslapi as fallback"

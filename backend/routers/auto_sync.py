@@ -25,7 +25,7 @@ async def get_auto_sync_status() -> dict:
 @router.put("/config")
 async def update_auto_sync_config(body: AutoSyncConfig) -> dict:
     """Enable/disable auto-sync or change the check interval."""
-    return auto_sync.configure(
+    return await auto_sync.configure(
         enabled=body.enabled,
         check_interval=body.check_interval,
     )

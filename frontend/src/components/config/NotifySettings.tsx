@@ -87,7 +87,7 @@ function ChannelCard({ channel, onChange, onRemove }: {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await post<{ ok: boolean; message: string }>('/config/test-notification', {
+      const result = await post<{ ok: boolean; message: string }>('/notifications/test', {
         type: channel.type,
         config: channel.config,
       });

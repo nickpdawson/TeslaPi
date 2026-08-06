@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import smtplib
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -14,6 +15,19 @@ from backend.database import get_db
 from backend.services import script_runner
 
 logger = logging.getLogger(__name__)
+
+# Only these env var name prefixes are forwarded to run/send-push-message. Channel
+# config is attacker-controllable (channels are created via the API), and its keys
+# become env var NAMES — so without an allowlist a key like `bash_env`, `ld_preload`,
+# `path`, or `ifs` would set a shell/loader-sensitive variable and run code when
+# `bash run/send-push-message` starts. Every variable the script actually consumes
+# begins with one of these service prefixes; nothing dangerous does.
+_ALLOWED_PUSH_ENV_PREFIXES = (
+    "TELEGRAM_", "DISCORD_", "SLACK_", "PUSHOVER_", "GOTIFY_", "NTFY_",
+    "MATRIX_", "SIGNAL_", "IFTTT_", "WEBHOOK_", "SNS_", "AWS_SNS_",
+    "NOTIFICATION_COMMAND_",
+)
+_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
 # Supported event types
 EVENT_TYPES = [
@@ -105,6 +119,21 @@ class NotificationService:
             }
         return await self._dispatch(channel, "test", title, message)
 
+    async def test_adhoc(self, channel_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Send a test notification through an UNSAVED channel config — used by the
+        Settings form to test before the channel is created. Dispatches with the same
+        machinery as a real channel; nothing is persisted."""
+        channel = {
+            "id": "adhoc-test",
+            "enabled": True,
+            "config": {**config, "type": channel_type},
+        }
+        from datetime import datetime, timezone
+        return await self._dispatch(
+            channel, "test", "TeslaPi Test",
+            f"Test notification sent at {datetime.now(timezone.utc).isoformat()}",
+        )
+
     async def _dispatch(
         self,
         channel: dict[str, Any],
@@ -157,26 +186,33 @@ class NotificationService:
         The script reads environment variables to determine which services
         (Telegram, Discord, Slack, Pushover, Gotify, etc.) are enabled.
         """
-        # Build environment variables from channel config
-        env_vars: list[str] = []
+        # Pass channel config as environment variables and title/message as argv —
+        # never as a shell string. Previously these were interpolated into a
+        # `bash -c "VAR=val ... script \"title\" \"message\""`, so a config value
+        # with a space/`;` or a title/message containing `$()`/backticks (failure
+        # notifications embed remote rsync stderr) executed as shell commands.
+        #
+        # Config keys become env var NAMES, and config is attacker-controllable, so
+        # forward only names that match a plain identifier AND a known service prefix
+        # — otherwise a key mapping to BASH_ENV/LD_PRELOAD/PATH/IFS would run code
+        # when bash starts.
+        env: dict[str, str] = {}
         for key, value in config.items():
             if key == "type":
                 continue
-            # Convert config keys to uppercase env vars
             env_key = key.upper()
-            env_vars.append(f"{env_key}={value}")
-
-        # The script expects: title message [type]
-        env_prefix = " ".join(env_vars)
-        if env_prefix:
-            cmd = f"{env_prefix} run/send-push-message"
-        else:
-            cmd = "run/send-push-message"
+            if not _ENV_NAME_RE.fullmatch(env_key):
+                continue
+            if not env_key.startswith(_ALLOWED_PUSH_ENV_PREFIXES):
+                logger.warning("Dropping unrecognized notification config key: %r", key)
+                continue
+            env[env_key] = str(value)
 
         result = await script_runner.run(
             "bash",
-            ["-c", f'{cmd} "{title}" "{message}"'],
+            ["run/send-push-message", title, message],
             timeout=30,
+            env=env,
         )
         if result.returncode != 0:
             raise RuntimeError(

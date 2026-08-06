@@ -1,4 +1,5 @@
-import { useState } from 'preact/hooks';
+import { useState, useEffect } from 'preact/hooks';
+import { Modal } from '../common/Modal';
 import { FormField } from '../common/FormField';
 import { Toggle } from '../common/Toggle';
 import { addNotification } from '../../stores/appState';
@@ -20,15 +21,19 @@ export function AddWiFiModal({ open, onClose, onAdd, prefillSsid }: AddWiFiModal
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Reset form when modal opens with new prefill
-  if (open && prefillSsid && ssid !== prefillSsid) {
-    setSsid(prefillSsid);
-    setPassword('');
-    setPriority(10);
-    setAutoConnect(true);
-    setHidden(false);
-    setTestResult(null);
-  }
+  // Reset the form whenever the modal opens (or the prefill changes). In an EFFECT,
+  // not during render — the old setState-in-render pattern could loop/extra-render.
+  useEffect(() => {
+    if (open) {
+      setSsid(prefillSsid ?? '');
+      setPassword('');
+      setPriority(10);
+      setAutoConnect(true);
+      setHidden(false);
+      setShowPassword(false);
+      setTestResult(null);
+    }
+  }, [open, prefillSsid]);
 
   async function handleSubmit() {
     if (!ssid.trim()) {
@@ -42,10 +47,8 @@ export function AddWiFiModal({ open, onClose, onAdd, prefillSsid }: AddWiFiModal
       await onAdd(ssid.trim(), password, priority, autoConnect, hidden);
       setTestResult({ success: true, message: `Successfully added ${ssid}` });
       addNotification('success', `Added ${ssid}`);
-      // Brief delay then close
-      setTimeout(() => {
-        handleClose();
-      }, 1200);
+      // Brief delay so the success message is seen, then close.
+      setTimeout(onClose, 1200);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to add network';
       setTestResult({ success: false, message: msg });
@@ -54,25 +57,16 @@ export function AddWiFiModal({ open, onClose, onAdd, prefillSsid }: AddWiFiModal
     }
   }
 
-  function handleClose() {
-    setSsid('');
-    setPassword('');
-    setPriority(10);
-    setAutoConnect(true);
-    setHidden(false);
-    setShowPassword(false);
-    setTestResult(null);
-    onClose();
-  }
-
-  if (!open) return null;
-
   return (
-    <div class="modal-overlay" onClick={handleClose}>
-      <div class="modal-card animate-fade-in" style={{ maxWidth: '520px' }} onClick={(e) => e.stopPropagation()}>
-        <h3 class="modal-title">Add WiFi Network</h3>
-
-        <div style={{ marginBottom: 'var(--space-4)' }}>
+    <Modal
+      open={open}
+      onClose={onClose}
+      onConfirm={handleSubmit}
+      title="Add WiFi Network"
+      confirmLabel={saving ? 'Adding...' : 'Test & Add'}
+      pending={saving}
+    >
+      <div style={{ marginBottom: 'var(--space-4)' }}>
           <FormField
             label="Network Name (SSID)"
             helpText="The name of the WiFi network to connect to."
@@ -153,18 +147,6 @@ export function AddWiFiModal({ open, onClose, onAdd, prefillSsid }: AddWiFiModal
             </div>
           )}
         </div>
-
-        <div class="modal-actions">
-          <button class="btn btn--ghost" onClick={handleClose}>Cancel</button>
-          <button
-            class="btn btn--primary"
-            onClick={handleSubmit}
-            disabled={saving || !ssid.trim()}
-          >
-            {saving ? 'Adding...' : 'Test & Add'}
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

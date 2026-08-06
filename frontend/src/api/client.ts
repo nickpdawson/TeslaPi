@@ -1,13 +1,44 @@
+export interface FieldError {
+  field: string;
+  message: string;
+}
+
 export class ApiError extends Error {
   status: number;
   statusText: string;
+  fieldErrors?: FieldError[];
 
-  constructor(status: number, statusText: string, message: string) {
+  constructor(status: number, statusText: string, message: string, fieldErrors?: FieldError[]) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.statusText = statusText;
+    this.fieldErrors = fieldErrors;
   }
+}
+
+// FastAPI reports errors as {detail: string} (HTTPException) or, for validation
+// failures, {detail: [{loc, msg, type}, ...]} (422). The client used to read only
+// `error`/`message`, which FastAPI never sends, so every failure showed the bare
+// status text. Turn `detail` into a readable message + per-field errors.
+export function formatDetail(detail: unknown): { message?: string; fieldErrors?: FieldError[] } {
+  if (typeof detail === 'string') {
+    return { message: detail };
+  }
+  if (Array.isArray(detail)) {
+    const fieldErrors: FieldError[] = detail.map((d) => {
+      const loc = Array.isArray(d?.loc) ? d.loc : [];
+      // Drop the leading source segment ("body"/"query"/"path") for readability.
+      const field = loc
+        .filter((p: unknown) => p !== 'body' && p !== 'query' && p !== 'path')
+        .join('.') || 'request';
+      const message = typeof d?.msg === 'string' ? d.msg : 'Invalid value';
+      return { field, message };
+    });
+    if (fieldErrors.length === 0) return {};
+    return { message: fieldErrors.map((f) => `${f.field}: ${f.message}`).join('; '), fieldErrors };
+  }
+  return {};
 }
 
 const BASE_URL = import.meta.env.DEV ? '/api' : '/api';
@@ -37,14 +68,21 @@ async function request<T>(
 
   if (!response.ok) {
     let message = response.statusText;
+    let fieldErrors: FieldError[] | undefined;
     try {
       const errBody = await response.json();
       if (errBody.error) message = errBody.error;
       if (errBody.message) message = errBody.message;
+      // FastAPI's `detail` is the canonical field; let it win when present.
+      if (errBody.detail !== undefined) {
+        const parsed = formatDetail(errBody.detail);
+        if (parsed.message) message = parsed.message;
+        fieldErrors = parsed.fieldErrors;
+      }
     } catch {
       // ignore parse failure
     }
-    throw new ApiError(response.status, response.statusText, message);
+    throw new ApiError(response.status, response.statusText, message, fieldErrors);
   }
 
   // Handle 204 No Content

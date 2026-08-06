@@ -79,6 +79,7 @@ class SystemStatus(BaseModel):
     teslausb_version: str = ""
     uptime_seconds: int = 0
     cpu_temp_celsius: float = 0.0
+    cpu_usage: float = 0.0  # percent, 0-100
     ram_used_bytes: int = 0
     ram_total_bytes: int = 0
     wifi_ssid: str = ""
@@ -217,6 +218,10 @@ class WireGuardConfig(BaseModel):
     peer_endpoint: str  # e.g. "203.0.113.1:51820"
     allowed_ips: str  # e.g. "10.0.0.0/16, 172.16.0.0/16"
     persistent_keepalive: int = 25
+    # The private key is generated + stored server-side and never sent by the UI.
+    # This flag disambiguates an empty private_key: True means "apply the freshly
+    # generated key"; False (an edit) means "keep the active tunnel's key".
+    use_generated_key: bool = False
 
 
 class WireGuardStatus(BaseModel):

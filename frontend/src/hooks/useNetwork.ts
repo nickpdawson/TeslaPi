@@ -88,8 +88,19 @@ export function useNetwork() {
 
   const refreshConnections = useCallback(async () => {
     try {
-      const data = await get<WiFiConnection[]>('/network/wifi/connections');
-      setConnections(data);
+      // Backend returns snake_case (auto_connect / ip_address); map to the camelCase
+      // WiFiConnection shape so the in-use marker and IP actually render.
+      const data = await get<Record<string, unknown>[]>('/network/wifi/connections');
+      setConnections(data.map((c) => ({
+        ssid: String(c.ssid ?? ''),
+        uuid: String(c.uuid ?? ''),
+        priority: Number(c.priority ?? 0),
+        autoConnect: Boolean(c.auto_connect ?? c.autoConnect ?? false),
+        active: Boolean(c.active ?? false),
+        device: (c.device ?? null) as string | null,
+        signal: (c.signal ?? null) as number | null,
+        ipAddress: (c.ip_address ?? c.ipAddress ?? null) as string | null,
+      })));
     } catch {
       // non-critical
     }
@@ -98,8 +109,14 @@ export function useNetwork() {
   const scanNetworks = useCallback(async () => {
     setScanning(true);
     try {
-      const data = await get<WiFiNetwork[]>('/network/wifi/scan');
-      setAvailable(data);
+      const data = await get<Record<string, unknown>[]>('/network/wifi/scan');
+      setAvailable(data.map((n) => ({
+        ssid: String(n.ssid ?? ''),
+        signal: Number(n.signal ?? 0),
+        security: String(n.security ?? ''),
+        frequency: String(n.frequency ?? ''),
+        inUse: Boolean(n.in_use ?? n.inUse ?? false),
+      })));
     } catch {
       // scan can fail transiently
     } finally {
@@ -108,7 +125,9 @@ export function useNetwork() {
   }, []);
 
   const addWifi = useCallback(async (ssid: string, password: string, priority: number, autoConnect: boolean, hidden: boolean) => {
-    await post('/network/wifi/add', { ssid, password, priority, autoConnect, hidden });
+    // Backend WiFiAddRequest expects snake_case `auto_connect`; sending `autoConnect`
+    // was silently ignored (unchecking auto-connect had no effect).
+    await post('/network/wifi/add', { ssid, password, priority, hidden, auto_connect: autoConnect });
     await refreshConnections();
     await refreshStatus();
   }, [refreshConnections, refreshStatus]);
@@ -130,7 +149,17 @@ export function useNetwork() {
   }, [refreshStatus, refreshConnections]);
 
   const saveWgConfig = useCallback(async (config: WireGuardConfig) => {
-    await put('/network/wireguard/config', config);
+    // Backend WireGuardConfig is snake_case; sending camelCase 422'd every save.
+    await put('/network/wireguard/config', {
+      private_key: config.privateKey,
+      address: config.address,
+      dns: config.dns,
+      peer_public_key: config.peerPublicKey,
+      peer_endpoint: config.peerEndpoint,
+      allowed_ips: config.allowedIps,
+      persistent_keepalive: config.persistentKeepalive,
+      use_generated_key: config.useGeneratedKey ?? false,
+    });
     await refreshWgStatus();
   }, [refreshWgStatus]);
 
@@ -140,17 +169,29 @@ export function useNetwork() {
   }, [refreshWgStatus]);
 
   const setWgAuto = useCallback(async (enabled: boolean, onlyNonHome: boolean, homeSsid: string | null) => {
-    await post('/network/wireguard/auto', { enabled, onlyNonHome, homeSsid });
+    // Backend AutoConnectRequest is snake_case; camelCase was silently ignored.
+    await post('/network/wireguard/auto', {
+      enabled,
+      only_non_home: onlyNonHome,
+      home_ssid: homeSsid ?? '',
+    });
     await refreshWgStatus();
   }, [refreshWgStatus]);
 
   const generateKeys = useCallback(async (): Promise<{ publicKey: string }> => {
-    const result = await post<{ publicKey: string }>('/network/wireguard/generate-keys');
-    return result;
+    // Backend returns snake_case public_key; reading publicKey gave undefined.
+    const result = await post<Record<string, unknown>>('/network/wireguard/generate-keys');
+    return { publicKey: String(result.public_key ?? result.publicKey ?? '') };
   }, []);
 
-  const testTunnel = useCallback(async (): Promise<{ success: boolean; latencyMs: number | null; error: string | null }> => {
-    return await post<{ success: boolean; latencyMs: number | null; error: string | null }>('/network/wireguard/test');
+  const testTunnel = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+    // Backend returns {success, message, details}; combine into one message
+    // (it carries latency/error text) rather than the nonexistent {latencyMs, error}.
+    const r = await post<{ success?: boolean; message?: string; details?: string }>(
+      '/network/wireguard/test',
+    );
+    const message = [r.message, r.details].filter(Boolean).join(' — ') || 'Tunnel test complete';
+    return { success: Boolean(r.success), message };
   }, []);
 
   // Initial load

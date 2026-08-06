@@ -46,6 +46,7 @@ export function SyncProgress({ job, onCancel }: SyncProgressProps) {
 
   const isActive = job.status === 'running' || job.status === 'pending';
   const isCompleted = job.status === 'completed';
+  const isPartial = job.status === 'partial';
   const isFailed = job.status === 'failed';
   const isCancelled = job.status === 'cancelled';
 
@@ -82,6 +83,21 @@ export function SyncProgress({ job, onCancel }: SyncProgressProps) {
             <div class="font-semibold" style={{ color: 'var(--color-success)' }}>Sync Complete</div>
             <div class="text-sm text-secondary">
               {job.files_copied.toLocaleString()} files ({formatBytes(job.bytes_copied)})
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isPartial && (
+        <div class="sync-progress__done">
+          <ErrorIcon />
+          <div style={{ marginLeft: 'var(--space-3)' }}>
+            <div class="font-semibold" style={{ color: 'var(--color-warning, var(--color-accent))' }}>Sync Incomplete</div>
+            <div class="text-sm text-secondary">
+              {job.error_message || 'Some files could not be copied; they will retry on the next sync.'}
+            </div>
+            <div class="text-xs text-muted" style={{ marginTop: 'var(--space-1)' }}>
+              {job.files_copied.toLocaleString()} files copied ({formatBytes(job.bytes_copied)})
             </div>
           </div>
         </div>

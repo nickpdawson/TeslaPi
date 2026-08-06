@@ -252,6 +252,76 @@ def _get_event_detail(event_id: str) -> EventDetailResponse | None:
     )
 
 
+async def _get_event_detail_from_db(event_id: str) -> EventDetailResponse | None:
+    """Load event detail from the archived-clips DB.
+
+    The cam image is unmounted while the USB gadget owns it, so the old path that
+    scanned /mnt/cam 404'd for every event (H2/SOL-013). Read the same
+    dashcam_archived_clips table that list_events uses, grouping clips by timestamp
+    into per-camera URLs.
+    """
+    import aiosqlite
+
+    parts = event_id.split("__", 1)
+    if len(parts) != 2:
+        return None
+    display_type, event_dir = parts
+    db_type = (
+        "SentryClips" if display_type == "sentry"
+        else "SavedClips" if display_type == "saved"
+        else display_type
+    )
+
+    rows: list[dict] = []
+    try:
+        async with aiosqlite.connect(str(settings.database_path)) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL")
+            async with db.execute(
+                "SELECT clip_file FROM dashcam_archived_clips "
+                "WHERE event_dir = ? AND event_type = ? ORDER BY clip_file",
+                (event_dir, db_type),
+            ) as cursor:
+                rows = [dict(r) async for r in cursor]
+    except Exception as exc:
+        logger.error("Failed to read event detail from DB: %s", exc)
+        return None
+
+    if not rows:
+        return None
+
+    # Group clips by timestamp; each timestamp maps camera -> video URL.
+    clip_map: dict[str, dict[str, str]] = {}
+    for row in rows:
+        clip_file = row.get("clip_file") or ""
+        m = _CLIP_FILE_RE.match(clip_file)
+        if not m:
+            continue
+        clip_ts, camera = m.group(1), m.group(2)
+        clip_map.setdefault(clip_ts, {})[camera] = (
+            f"/api/dashcam/video/{db_type}/{event_dir}/{clip_file}"
+        )
+
+    clips = [
+        ClipResponse(timestamp=ts, cameras=clip_map[ts], duration=60.0)
+        for ts in sorted(clip_map.keys())
+    ]
+    if not clips:
+        return None
+
+    ts_date = event_dir[:10] if len(event_dir) >= 10 else event_dir
+    ts_time = event_dir[11:].replace("-", ":") if len(event_dir) > 11 else "00:00:00"
+
+    return EventDetailResponse(
+        id=event_id,
+        type=display_type,
+        timestamp=f"{ts_date}T{ts_time}",
+        clips=clips,
+        totalDuration=60.0 * len(clips),
+        archived=True,
+    )
+
+
 # --- Routes ---
 
 @router.get("/events", response_model=list[EventResponse])
@@ -341,7 +411,7 @@ async def get_event(event_id: str) -> EventDetailResponse:
             raise HTTPException(status_code=404, detail="Event not found")
         return detail
 
-    detail = _get_event_detail(event_id)
+    detail = await _get_event_detail_from_db(event_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Event not found")
     return detail

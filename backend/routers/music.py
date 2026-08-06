@@ -203,11 +203,24 @@ async def recent_items(
 @router.post("/library/index")
 async def trigger_index() -> dict:
     """Trigger re-indexing of the music library."""
-    status = music_index.get_indexing_status()
-    if status["active"]:
+    # Don't index during a sync — a re-index resetting synced=0 for a changed file
+    # would race the sync's synced=1 marking (lost reset → file hidden). They also
+    # contend for the share.
+    if music_sync._active_sync.get("job_id") is not None:
+        raise HTTPException(status_code=409, detail="A music sync is in progress; index after it finishes.")
+    if music_index.get_indexing_status()["active"]:
         raise HTTPException(status_code=409, detail="Indexing already in progress")
 
     mountpoint = await _ensure_music_share_mounted()
+
+    # Re-check + claim SYNCHRONOUSLY right before spawning the task (no await between
+    # the claim and create_task), so a sync starting during the mount await above is
+    # seen, and start_sync (which checks indexing active) will refuse.
+    if music_sync._active_sync.get("job_id") is not None:
+        raise HTTPException(status_code=409, detail="A music sync is in progress; index after it finishes.")
+    if not music_index.try_claim_indexing():
+        raise HTTPException(status_code=409, detail="Indexing already in progress")
+
     asyncio.create_task(music_index.index_library(mountpoint, settings.database_path))
     return {"message": "Indexing started", "status": "indexing"}
 
@@ -238,36 +251,59 @@ async def get_local_music() -> dict:
     music_dir = music_sync.MUSIC_DEST
     image_path = music_sync.MUSIC_IMAGE
 
-    # Mount read-only (skip if already mounted)
-    already_mounted = False
-    check = await script_runner.run("mountpoint", ["-q", mount_point], timeout=5)
-    if check.returncode == 0:
-        already_mounted = True
-    else:
-        result = await script_runner.run(
-            "mount", ["-o", "loop,ro", image_path, mount_point], timeout=15,
-        )
-        if result.returncode != 0:
-            raise HTTPException(status_code=503, detail=f"Failed to mount music image: {result.stderr}")
+    # If a sync is in progress, the image is mounted RW by the sync. Don't fight
+    # it — our RO remount or umount could corrupt rsync mid-flight. The UI shows
+    # a "syncing" state from /api/music/sync/status; serving a stale/empty tree
+    # here is the right behavior.
+    if music_sync._active_sync.get("job_id") is not None:
+        return {"artists": [], "total_size": 0, "total_tracks": 0, "capacity_bytes": 0, "syncing": True}
 
-    try:
-        artists = []
-        total_size = 0
-        total_tracks = 0
+    # Serialize with music_sync._run_sync's mount step.
+    async with music_sync._image_mount_lock:
+        # Re-check after acquiring the lock — a sync may have started while we waited.
+        if music_sync._active_sync.get("job_id") is not None:
+            return {"artists": [], "total_size": 0, "total_tracks": 0, "capacity_bytes": 0, "syncing": True}
 
-        if os.path.isdir(music_dir):
-            loop = asyncio.get_event_loop()
-            artists, total_size, total_tracks = await loop.run_in_executor(
-                None, _scan_local_music_dir, music_dir
+        we_mounted = False
+        check = await script_runner.run("mountpoint", ["-q", mount_point], timeout=5)
+        if check.returncode != 0:
+            result = await script_runner.run(
+                "mount", ["-o", "loop,ro", image_path, mount_point], timeout=15,
             )
-    finally:
-        if not already_mounted:
-            await script_runner.run("umount", [mount_point], timeout=15)
+            if result.returncode != 0:
+                raise HTTPException(status_code=503, detail=f"Failed to mount music image: {result.stderr}")
+            we_mounted = True
+
+        try:
+            artists = []
+            total_size = 0
+            total_tracks = 0
+            capacity_bytes = 0
+
+            if os.path.isdir(music_dir):
+                loop = asyncio.get_event_loop()
+                artists, total_size, total_tracks = await loop.run_in_executor(
+                    None, _scan_local_music_dir, music_dir
+                )
+            # Real capacity of the mounted music image (its FAT filesystem total),
+            # so the UI usage bar reflects the actual drive size instead of a
+            # hardcoded 1.7 TB that made every drive look ~empty.
+            try:
+                st = os.statvfs(mount_point)
+                capacity_bytes = st.f_blocks * st.f_frsize
+            except OSError:
+                capacity_bytes = 0
+        finally:
+            # Only ever unmount what WE mounted. Never unmount a mount established
+            # by a sync (or anyone else).
+            if we_mounted:
+                await script_runner.run("umount", [mount_point], timeout=15)
 
     return {
         "artists": artists,
         "total_size": total_size,
         "total_tracks": total_tracks,
+        "capacity_bytes": capacity_bytes,
     }
 
 
@@ -452,6 +488,7 @@ def _mock_local_music() -> dict:
         ],
         "total_size": 630_500_000,
         "total_tracks": 24,
+        "capacity_bytes": 20 * 1024 ** 3,  # 20 GB default music image
     }
 
 
@@ -475,45 +512,83 @@ async def delete_local_music(req: DeleteLocalRequest) -> dict:
     mount_point = music_sync.MUSIC_MOUNT
     image_path = music_sync.MUSIC_IMAGE
 
-    # Step 1: Disable gadget
+    # Never touch the image while a sync owns it — rsync is writing it RW, and our
+    # mount/umount + gadget toggle would corrupt the transfer. The sync's mount lock
+    # only serializes mounts; the job_id check refuses the operation outright.
+    if music_sync._active_sync.get("job_id") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A music sync is in progress. Try again once it finishes.",
+        )
+
+    # Step 1: Disable gadget (required to mount the image read-write)
     result = await script_runner.run(
         "bash", [music_sync.GADGET_DISABLE], timeout=15,
     )
     if result.returncode != 0:
         logger.warning("Gadget disable returned %d (may already be disabled)", result.returncode)
 
+    # Whether the image is confirmed unmounted before the gadget is re-presented.
+    # The image must NEVER go back to the car while host-mounted RW (corruption).
+    image_released = False
     try:
-        # Step 2: Mount rw
-        result = await script_runner.run(
-            "mount", ["-o", "loop", image_path, mount_point], timeout=15,
-        )
-        if result.returncode != 0:
-            raise HTTPException(status_code=503, detail=f"Failed to mount music image: {result.stderr}")
+        # Serialize the mount/umount with music_sync and /api/music/local.
+        async with music_sync._image_mount_lock:
+            # Re-check: a sync may have started while we waited for the lock.
+            if music_sync._active_sync.get("job_id") is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A music sync started. Delete aborted; try again later.",
+                )
 
-        try:
-            # Step 3: Delete
-            target = os.path.join(mount_point, req.path)
-            target = os.path.realpath(target)
+            # Step 2: Mount rw (skip if already mounted — we release it either way)
+            check = await script_runner.run("mountpoint", ["-q", mount_point], timeout=5)
+            if check.returncode != 0:
+                result = await script_runner.run(
+                    "mount", ["-o", "loop", image_path, mount_point], timeout=15,
+                )
+                if result.returncode != 0:
+                    raise HTTPException(status_code=503, detail=f"Failed to mount music image: {result.stderr}")
 
-            # Security: ensure target is under mount point
-            if not target.startswith(os.path.realpath(mount_point)):
-                raise HTTPException(status_code=400, detail="Invalid path")
+            try:
+                # Step 3: Delete — resolve symlinks and require the target to stay
+                # strictly within the mount root (commonpath, not a string prefix,
+                # so a sibling like /mnt/music_share can't pass via '../').
+                target = os.path.realpath(os.path.join(mount_point, req.path))
+                root = os.path.realpath(mount_point)
+                if target != root and os.path.commonpath([target, root]) != root:
+                    raise HTTPException(status_code=400, detail="Invalid path")
+                if target == root:
+                    raise HTTPException(status_code=400, detail="Refusing to delete the drive root")
 
-            if os.path.isdir(target):
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, shutil.rmtree, target)
-            elif os.path.isfile(target):
-                os.unlink(target)
-            else:
-                raise HTTPException(status_code=404, detail="Path not found")
+                if os.path.isdir(target):
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, shutil.rmtree, target)
+                elif os.path.isfile(target):
+                    os.unlink(target)
+                else:
+                    raise HTTPException(status_code=404, detail="Path not found")
 
-        finally:
-            # Step 4: Unmount
-            await script_runner.run("umount", [mount_point], timeout=15)
+            finally:
+                # Step 4: Release the image (verified umount) before leaving the lock.
+                image_released = await music_sync._ensure_image_unmounted("delete_local_music")
     finally:
-        # Step 5: Re-enable gadget
-        await script_runner.run(
-            "bash", [music_sync.GADGET_ENABLE], timeout=15,
+        # Step 5: Re-enable the gadget ONLY if the image is confirmed unmounted.
+        if image_released:
+            await script_runner.run(
+                "bash", [music_sync.GADGET_ENABLE], timeout=15,
+            )
+        else:
+            logger.critical(
+                "delete_local_music: music image could not be unmounted; NOT re-enabling "
+                "the gadget to avoid corrupting the drive. Manual intervention needed.",
+            )
+
+    if not image_released:
+        raise HTTPException(
+            status_code=500,
+            detail="Deleted, but the music image could not be safely unmounted; the drive "
+                   "is temporarily offline to the car. Reboot or unmount /mnt/music manually.",
         )
 
     return {"message": f"Deleted {req.path}", "deleted": True}
@@ -613,40 +688,28 @@ async def start_full_sync() -> dict:
 
 @router.post("/sync/new")
 async def start_new_sync() -> dict:
-    """Sync only files newer than the last sync.
+    """Sync indexed files that aren't on the Tesla yet.
 
-    Uses the most recent completed sync job's timestamp to determine
-    which files are 'new'. Falls back to full sync if no history.
+    "New" means not-yet-synced (music_files.synced = 0) — the correct watermark.
+    A file added to the library with an OLD mtime (e.g. ripping an old album) is
+    still new-to-Tesla, which a last-sync-timestamp cutoff would miss. The synced
+    flag is set by full syncs (whole index) and selective syncs (their files), and
+    reset when re-indexing detects a changed file.
     """
     try:
-        last_job = await music_sync.get_sync_status(settings.database_path)
-        last_completed = None
-        if last_job and last_job.get("status") == "completed" and last_job.get("completed_at"):
-            last_completed = last_job["completed_at"]
-
-        if not last_completed:
-            # No previous sync — do a full sync
-            job_id = await music_sync.start_sync(
-                paths=[],
-                mode="full",
-                db_path=settings.database_path,
-            )
-            return {"job_id": job_id, "status": "pending", "mode": "full", "note": "No previous sync found, running full sync"}
-
-        # Get items modified after the last sync
         import aiosqlite
         newer_paths = []
         async with aiosqlite.connect(settings.database_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT DISTINCT '/' || artist || '/' || album as path FROM music_files WHERE modified_time > ? GROUP BY artist, album",
-                (last_completed,),
+                "SELECT DISTINCT '/' || artist || '/' || album as path "
+                "FROM music_files WHERE synced = 0 GROUP BY artist, album"
             ) as cursor:
                 async for row in cursor:
                     newer_paths.append(row["path"])
 
         if not newer_paths:
-            return {"job_id": None, "status": "idle", "mode": "new", "note": "No new files since last sync"}
+            return {"job_id": None, "status": "idle", "mode": "new", "note": "No new files to sync"}
 
         job_id = await music_sync.start_sync(
             paths=newer_paths,

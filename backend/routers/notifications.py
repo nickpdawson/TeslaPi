@@ -6,11 +6,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from backend.config import settings
 from backend.database import get_db
 from backend.services import notification_service
 from backend.services.notification_service import EVENT_TYPES
+
+
+class AdHocTestRequest(BaseModel):
+    """An unsaved channel to test from the Settings form before creating it."""
+    type: str
+    config: dict[str, Any] = {}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/notifications")
@@ -60,6 +67,18 @@ async def upsert_channel(channel_id: str, body: dict[str, Any]) -> dict[str, Any
         raise HTTPException(status_code=400, detail="Channel config is required")
 
     async with get_db() as db:
+        # list_channels masks secrets to the mask; the form prefills that and sends it
+        # back. Merge against the stored config so an echoed mask keeps the real secret
+        # instead of overwriting it (and a mask with nothing stored is dropped, never
+        # persisted literally).
+        cursor = await db.execute(
+            "SELECT config_json FROM notification_channels WHERE id = ?", (channel_id,)
+        )
+        row = await cursor.fetchone()
+        existing = json.loads(row["config_json"]) if row and row["config_json"] else {}
+        merged = _merge_preserving_secrets(config, existing)
+        merged_json = json.dumps(merged)
+
         await db.execute(
             """
             INSERT INTO notification_channels (id, enabled, config_json, updated_at)
@@ -72,7 +91,7 @@ async def upsert_channel(channel_id: str, body: dict[str, Any]) -> dict[str, Any
             (
                 channel_id,
                 1 if enabled else 0,
-                json.dumps(config),
+                merged_json,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -100,6 +119,20 @@ async def delete_channel(channel_id: str) -> dict[str, Any]:
 
     await notification_service.reload_service()
     return {"status": "deleted", "id": channel_id}
+
+
+@router.post("/test")
+async def test_adhoc(body: AdHocTestRequest) -> dict[str, Any]:
+    """Test an unsaved channel config (Settings form, before the channel is created).
+    Returns {ok, message} — the shape the UI reads."""
+    svc = await notification_service.get_service()
+    result = await svc.test_adhoc(body.type, body.config)
+    ok = result.get("status") != "error"
+    return {
+        "ok": ok,
+        "message": (result.get("error") or "Test notification sent.") if not ok
+        else "Test notification sent.",
+    }
 
 
 @router.post("/test/{channel_id}")
@@ -255,14 +288,39 @@ async def update_rules(body: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 _SENSITIVE_KEYS = {"password", "token", "secret", "key", "api_key", "smtp_password", "mqtt_password"}
+_MASK = "********"
+
+
+def _is_sensitive(key: str) -> bool:
+    return any(sensitive in key.lower() for sensitive in _SENSITIVE_KEYS)
 
 
 def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive values in a channel config dict."""
     sanitized = {}
     for k, v in config.items():
-        if any(sensitive in k.lower() for sensitive in _SENSITIVE_KEYS) and v:
-            sanitized[k] = "********"
+        if _is_sensitive(k) and v:
+            sanitized[k] = _MASK
         else:
             sanitized[k] = v
     return sanitized
+
+
+def _merge_preserving_secrets(
+    incoming: dict[str, Any], existing: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge an incoming channel config over the stored one, keeping real secrets.
+
+    A sensitive field whose incoming value is the mask means "unchanged": keep the
+    stored value, or drop the field if nothing is stored (so the literal mask is
+    never persisted as a credential). Every other field is taken as sent.
+    """
+    merged: dict[str, Any] = {}
+    for k, v in incoming.items():
+        if _is_sensitive(k) and v == _MASK:
+            if existing.get(k):
+                merged[k] = existing[k]
+            # else: omit — don't store the mask as if it were the secret
+        else:
+            merged[k] = v
+    return merged

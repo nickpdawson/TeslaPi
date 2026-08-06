@@ -6,6 +6,21 @@ const BASE_URL = import.meta.env.DEV ? '/api' : '/api';
 
 export type Drive = 'music' | 'lightshow' | 'boombox';
 
+/**
+ * Decide whether a just-resolved directory listing is still current and safe to
+ * render (iters 17/18). Apply it only if it's the latest request (seq) AND it was
+ * issued for the drive still on screen (drive) — otherwise a late response would
+ * show the wrong drive's files and enable wrong-drive operations.
+ */
+export function shouldApplyListing(
+  seq: number,
+  currentSeq: number,
+  reqDrive: Drive,
+  currentDrive: Drive,
+): boolean {
+  return seq === currentSeq && reqDrive === currentDrive;
+}
+
 export function useFiles() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +44,9 @@ export function useFiles() {
     path: string,
     file: File,
     onProgress?: (pct: number) => void,
+    // Handed the XHR's abort function so the caller can actually cancel the transfer
+    // (the Cancel button previously only flipped UI state while the upload continued).
+    onAbortReady?: (abort: () => void) => void,
   ): Promise<boolean> => {
     return new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
@@ -50,8 +68,15 @@ export function useFiles() {
         resolve(false);
       });
 
+      // A cancelled upload resolves false — same as a failure — so callers finalize it.
+      xhr.addEventListener('abort', () => {
+        resolve(false);
+      });
+
       xhr.open('POST', `${BASE_URL}/files/${drive}/upload`);
       xhr.send(formData);
+
+      onAbortReady?.(() => xhr.abort());
     });
   }, []);
 
@@ -66,7 +91,7 @@ export function useFiles() {
 
   const deleteItems = useCallback(async (drive: Drive, paths: string[]): Promise<boolean> => {
     try {
-      await post(`/files/${drive}/rm`, { paths });
+      await post(`/files/${drive}/rm`, { paths, confirm: true });
       return true;
     } catch {
       return false;
@@ -75,7 +100,7 @@ export function useFiles() {
 
   const moveItem = useCallback(async (drive: Drive, src: string, dest: string): Promise<boolean> => {
     try {
-      await post(`/files/${drive}/mv`, { src, dest });
+      await post(`/files/${drive}/mv`, { src, dst: dest });
       return true;
     } catch {
       return false;
@@ -84,7 +109,7 @@ export function useFiles() {
 
   const copyItem = useCallback(async (drive: Drive, src: string, dest: string): Promise<boolean> => {
     try {
-      await post(`/files/${drive}/cp`, { src, dest });
+      await post(`/files/${drive}/cp`, { src, dst: dest });
       return true;
     } catch {
       return false;

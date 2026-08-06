@@ -42,7 +42,15 @@ if [[ ! -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
     exit 0
 fi
 
-CURRENT_SSID=$(nmcli -t -f GENERAL.CONNECTION device show "$INTERFACE" 2>/dev/null | cut -d: -f2)
+# The ACTIVE SSID, not the connection-profile name. GENERAL.CONNECTION returns the
+# NetworkManager profile name, which is usually but NOT always the SSID (a renamed
+# profile broke home-network detection). iwgetid returns the real associated SSID
+# (the same method the backend uses); fall back to the profile's ssid field.
+CURRENT_SSID=$(iwgetid "$INTERFACE" -r 2>/dev/null)
+if [[ -z "$CURRENT_SSID" ]]; then
+    _wg_conn=$(nmcli -t -f GENERAL.CONNECTION device show "$INTERFACE" 2>/dev/null | cut -d: -f2)
+    CURRENT_SSID=$(nmcli -t -f 802-11-wireless.ssid connection show "$_wg_conn" 2>/dev/null | cut -d: -f2)
+fi
 
 if [[ "$ACTION" == "up" ]]; then
     log "WiFi up on $INTERFACE, SSID='$CURRENT_SSID'"

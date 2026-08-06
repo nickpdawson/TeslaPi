@@ -39,7 +39,7 @@ export function HASettings({ config: initConfig, onSave }: HASettingsProps) {
     setTestResult(null);
     try {
       const result = await post<{ ok: boolean; message: string; haVersion?: string; instanceName?: string }>(
-        '/config/test-ha',
+        '/ha/test',
         { url: config.url, token: config.token }
       );
       setTestResult(result);

@@ -38,6 +38,12 @@ export function FileList({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Touch tap tracking: a short tap (no long-press, no drag) OPENS the entry, so
+  // touch users can navigate folders (which otherwise only opened on e.detail===2).
+  const touchState = useRef<{ entry: FileEntry; x: number; y: number; longPress: boolean } | null>(null);
+  // A handled touch tap is followed by a synthesized mouse click; ignore clicks
+  // until this time so the tap doesn't also run selection.
+  const suppressClickUntil = useRef(0);
 
   const sorted = sortEntries(entries, sortField, sortDir);
 
@@ -51,8 +57,11 @@ export function FileList({
   }
 
   function handleRowClick(entry: FileEntry, e: MouseEvent) {
+    // Ignore the synthesized click that follows a touch tap we already handled.
+    if (Date.now() < suppressClickUntil.current) return;
+
     if (e.detail === 2) {
-      // double click
+      // double click (mouse) opens
       onDoubleClick(entry);
       return;
     }
@@ -93,7 +102,9 @@ export function FileList({
 
   function handleTouchStart(entry: FileEntry, e: TouchEvent) {
     const touch = e.touches[0];
+    touchState.current = { entry, x: touch.clientX, y: touch.clientY, longPress: false };
     longPressTimer.current = setTimeout(() => {
+      if (touchState.current) touchState.current.longPress = true;
       if (!selectedPaths.has(entry.path)) {
         onSelect(new Set([entry.path]));
       }
@@ -101,10 +112,32 @@ export function FileList({
     }, 500);
   }
 
+  function handleTouchMove(e: TouchEvent) {
+    const st = touchState.current;
+    const touch = e.touches[0];
+    // A finger that moves is scrolling/dragging, not a tap — cancel both.
+    if (st && touch && (Math.abs(touch.clientX - st.x) > 10 || Math.abs(touch.clientY - st.y) > 10)) {
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
+      touchState.current = null;
+    }
+  }
+
   function handleTouchEnd() {
     if (longPressTimer.current) {
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
+    }
+    const st = touchState.current;
+    touchState.current = null;
+    if (!st) return;  // was a scroll/drag/cancel
+    // Suppress the follow-up synthesized click, then act on the tap.
+    suppressClickUntil.current = Date.now() + 700;
+    if (!st.longPress) {
+      // Short tap → open: navigate into a folder, or open/download a file.
+      onDoubleClick(st.entry);
     }
   }
 
@@ -181,21 +214,37 @@ export function FileList({
     );
   }
 
+  // The active-descendant row (the arrow-key cursor = the selected row) so screen
+  // readers announce the current option as focus moves within the listbox.
+  const activeIndex = sorted.findIndex((s) => selectedPaths.has(s.path));
+  const activeDescendant = activeIndex >= 0 ? `file-row-${activeIndex}` : undefined;
+
   return (
-    <div class="file-list" ref={listRef} tabIndex={0}>
+    <div
+      class="file-list"
+      ref={listRef}
+      tabIndex={0}
+      role="listbox"
+      aria-label="Files"
+      aria-activedescendant={activeDescendant}
+    >
       <div class="file-list__header">
         <SortHeader field="name" current={sortField} dir={sortDir} onSort={handleSort} label="Name" />
         <SortHeader field="size" current={sortField} dir={sortDir} onSort={handleSort} label="Size" className="file-list__col-size" />
         <SortHeader field="modified" current={sortField} dir={sortDir} onSort={handleSort} label="Modified" className="file-list__col-modified" />
       </div>
       <div class="file-list__body">
-        {sorted.map((entry) => (
+        {sorted.map((entry, i) => (
           <div
             key={entry.path}
+            id={`file-row-${i}`}
+            role="option"
+            aria-selected={selectedPaths.has(entry.path)}
             class={`file-list__row ${selectedPaths.has(entry.path) ? 'file-list__row--selected' : ''}`}
             onClick={(e) => handleRowClick(entry, e)}
             onContextMenu={(e) => handleContextMenu(entry, e)}
             onTouchStart={(e) => handleTouchStart(entry, e)}
+            onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchEnd}
           >

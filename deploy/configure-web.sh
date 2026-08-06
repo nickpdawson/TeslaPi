@@ -29,11 +29,21 @@ else
     bash /tmp/teslapi/install.sh
 fi
 
-# Ensure nginx config is in place
+# Ensure nginx config is in place. Validate the new config BEFORE committing the
+# switch: if teslapi.nginx is invalid, keep/restore the default site so nginx still
+# has a working config — the old code removed default first, so a bad config left
+# nginx (and the whole UI) down with nothing to serve.
 if [[ -f /opt/teslapi/teslapi.nginx ]]; then
     cp /opt/teslapi/teslapi.nginx /etc/nginx/sites-available/teslapi
-    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     ln -sf /etc/nginx/sites-available/teslapi /etc/nginx/sites-enabled/teslapi
+    # Drop default (it can conflict on :80) then validate the full config.
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    if ! nginx -t 2>/dev/null; then
+        log_progress "ERROR: teslapi nginx config failed validation; restoring default site"
+        rm -f /etc/nginx/sites-enabled/teslapi 2>/dev/null || true
+        [[ -f /etc/nginx/sites-available/default ]] && \
+            ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+    fi
 fi
 
 # Configure drives for web access based on teslausb config
@@ -61,7 +71,9 @@ cat > /mutable/teslapi/drives.json <<DRIVESEOF
 DRIVESEOF
 
 systemctl enable nginx
-systemctl start nginx
+if ! systemctl start nginx; then
+    log_progress "ERROR: nginx failed to start — check 'nginx -t' and 'journalctl -u nginx'"
+fi
 systemctl enable teslapi 2>/dev/null || true
 systemctl start teslapi 2>/dev/null || true
 

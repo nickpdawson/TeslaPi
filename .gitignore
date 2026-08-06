@@ -56,3 +56,4 @@ Screenshots/Dashboard.png
 # Development logs and plans
 development_log.md
 teslapi_plan.md
+.pytest_cache/

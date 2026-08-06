@@ -71,6 +71,10 @@ select {
 
 /* --- CSS Custom Properties — Dark Theme (default) --- */
 :root {
+  /* Layout — single source of truth for the shell header height (used by full-height
+     page calcs). 56px on mobile, 64px ≥768px; see the media override below. */
+  --header-height: 56px;
+
   /* Colors — Dark */
   --color-bg: #0a0e17;
   --color-bg-raised: #111827;
@@ -413,4 +417,26 @@ select {
 ::selection {
   background: var(--color-accent);
   color: white;
+}
+
+/* --- Reduced motion --- */
+/* Respect the OS "reduce motion" setting: collapse animations/transitions to
+   near-instant (keeps state changes functional without motion). The dashboard
+   hero ring, spinners, and card transitions all animate, so this is global. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Header grows on wider viewports — keep --header-height in sync for page calcs. */
+@media (min-width: 768px) {
+  :root {
+    --header-height: 64px;
+  }
 }

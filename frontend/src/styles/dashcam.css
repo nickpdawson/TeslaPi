@@ -6,7 +6,7 @@
 /* --- Page Layout --- */
 .dashcam-page {
   display: flex;
-  height: calc(100vh - 60px);
+  height: calc(100vh - var(--header-height));
   overflow: hidden;
 }
 
@@ -691,7 +691,7 @@
 @media (max-width: 768px) {
   .dashcam-page {
     flex-direction: column;
-    height: calc(100vh - 56px);
+    height: calc(100vh - var(--header-height));
   }
 
   .dashcam-sidebar {

@@ -2,6 +2,9 @@
 Description=TeslaPi Web Dashboard
 After=network-online.target
 Wants=network-online.target
+# The DB lives at /mutable/teslapi/teslapi.db — don't start until /mutable is mounted,
+# otherwise the DB is written to the rootfs mountpoint and shadowed when it mounts.
+RequiresMountsFor=/mutable
 
 [Service]
 Type=exec

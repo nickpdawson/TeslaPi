@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'preact/hooks';
+import { useState, useCallback, useEffect, useRef } from 'preact/hooks';
 import type { FileEntry } from '../../api/types';
 import type { Drive } from '../../hooks/useFiles';
 import { useFiles } from '../../hooks/useFiles';
@@ -17,13 +17,18 @@ interface FileTreeProps {
 
 export function FileTree({ drive, currentPath, onNavigate }: FileTreeProps) {
   const [roots, setRoots] = useState<TreeNode[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const { listFiles } = useFiles();
+  // Tokens the async responses check against, so a drive switch mid-load can't leave
+  // one drive's tree showing under another (the old code loaded roots once and never
+  // reloaded on drive change — the tree was permanently stale).
+  const requestSeq = useRef(0);
 
-  // Load root on first render / drive change
-  if (!loaded) {
-    setLoaded(true);
+  // Reload the root tree whenever the drive changes (and on first mount).
+  useEffect(() => {
+    const seq = ++requestSeq.current;
+    setRoots([]);
     listFiles(drive, '/').then((data) => {
+      if (seq !== requestSeq.current) return;  // superseded by a newer drive
       if (data) {
         setRoots(
           data.entries
@@ -33,7 +38,7 @@ export function FileTree({ drive, currentPath, onNavigate }: FileTreeProps) {
         );
       }
     });
-  }
+  }, [drive, listFiles]);
 
   const toggleNode = useCallback(async (node: TreeNode, path: TreeNode[]) => {
     if (node.expanded) {
@@ -42,7 +47,9 @@ export function FileTree({ drive, currentPath, onNavigate }: FileTreeProps) {
     } else {
       // Expand and load children if needed
       if (node.children === null) {
+        const seq = requestSeq.current;
         const data = await listFiles(drive, node.entry.path);
+        if (seq !== requestSeq.current) return;  // drive changed mid-load; drop it
         const children = data
           ? data.entries
               .filter((e) => e.isDirectory)

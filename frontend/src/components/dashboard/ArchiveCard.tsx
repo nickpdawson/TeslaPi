@@ -153,8 +153,9 @@ export function ArchiveCard({ archive }: ArchiveCardProps) {
 
   // Determine card state
   const isError = currentStatus === 'error' || job?.status === 'failed';
+  const isPartial = job?.status === 'partial';
   const isUnreachable = currentStatus === 'unreachable' || !serverReachable;
-  const isIdle = !isRunning && !isError;
+  const isIdle = !isRunning && !isError && !isPartial;
 
   return (
     <Card title="Archive" icon={<ArchiveIcon />}>
@@ -275,6 +276,32 @@ export function ArchiveCard({ archive }: ArchiveCardProps) {
                 color: 'var(--color-text-muted)',
               }}>
                 {job.errorMessage}
+              </div>
+            </div>
+          )}
+
+          {/* Partial archive: some clips failed and will retry next run */}
+          {isPartial && (
+            <div style={{
+              padding: 'var(--space-3)',
+              background: 'var(--color-warning-glow, var(--color-accent-glow))',
+              border: '1px solid var(--color-warning, var(--color-accent))',
+              borderRadius: 'var(--radius-md)',
+              marginBottom: 'var(--space-4)',
+            }}>
+              <div style={{
+                fontSize: 'var(--text-sm)',
+                color: 'var(--color-warning, var(--color-accent))',
+                fontWeight: 'var(--font-weight-medium)',
+                marginBottom: 'var(--space-1)',
+              }}>
+                Archive incomplete
+              </div>
+              <div style={{
+                fontSize: 'var(--text-xs)',
+                color: 'var(--color-text-muted)',
+              }}>
+                {job?.errorMessage || 'Some clips could not be archived; they will retry on the next run.'}
               </div>
             </div>
           )}

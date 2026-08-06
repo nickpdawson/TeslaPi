@@ -39,6 +39,7 @@ export function Card({
               class={`card__expand-btn ${expanded ? 'card__expand-btn--open' : ''}`}
               onClick={handleExpand}
               aria-label={expanded ? 'Collapse' : 'Expand'}
+              aria-expanded={expanded}
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="4,6 8,10 12,6" />

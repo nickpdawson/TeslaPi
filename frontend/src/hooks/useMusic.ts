@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'preact/hooks';
 import { get, post, del } from '../api/client';
+import { addNotification } from '../stores/appState';
 import type {
   MusicArtist,
   MusicAlbum,
@@ -192,7 +193,11 @@ export function useMusic() {
       await fetchLocalMusic();
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete');
+      // Surface action failures as a toast — otherwise the error was only stored in
+      // state that nothing rendered, so users re-tapped a silently-failing button.
+      const msg = err instanceof Error ? err.message : 'Failed to delete';
+      setError(msg);
+      addNotification('error', msg);
       return false;
     }
   }, [fetchLocalMusic]);
@@ -203,7 +208,9 @@ export function useMusic() {
       startSyncPolling();
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start full sync');
+      const msg = err instanceof Error ? err.message : 'Failed to start full sync';
+      setError(msg);
+      addNotification('error', msg);
       return null;
     }
   }, []);
@@ -216,7 +223,9 @@ export function useMusic() {
       }
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start new sync');
+      const msg = err instanceof Error ? err.message : 'Failed to start new sync';
+      setError(msg);
+      addNotification('error', msg);
       return null;
     }
   }, []);
@@ -279,7 +288,9 @@ export function useMusic() {
       // Start polling indexing status
       pollIndexingStatus();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start indexing');
+      const msg = err instanceof Error ? err.message : 'Failed to start indexing';
+      setError(msg);
+      addNotification('error', msg);
     }
   }, []);
 
@@ -340,10 +351,26 @@ export function useMusic() {
   const startSyncPolling = useCallback(() => {
     if (syncPollRef.current) clearTimeout(syncPollRef.current);
 
+    // Only announce the outcome if we actually observed the sync running in this
+    // polling session — avoids toasting an old terminal job on a fresh page load.
+    let sawActive = false;
+
     async function poll() {
       const data = await fetchSyncStatus();
       if (data && (data.status === 'pending' || data.status === 'running')) {
+        sawActive = true;
         syncPollRef.current = setTimeout(poll, SYNC_POLL_MS);
+      } else if (data && sawActive) {
+        // Sync just reached a terminal state — surface it (the inline
+        // SyncProgress card is unmounted once the job leaves the active state).
+        const msg = data.job?.error_message;
+        if (data.status === 'completed') {
+          addNotification('success', 'Music sync complete.');
+        } else if (data.status === 'partial') {
+          addNotification('warning', msg || 'Music sync finished with some files skipped; they will retry on the next sync.');
+        } else if (data.status === 'failed') {
+          addNotification('error', msg || 'Music sync failed.');
+        }
       }
     }
     poll();

@@ -63,16 +63,46 @@ export function Timeline({ state, clips, onSeek, sentryTriggerTime }: TimelinePr
   }, [getTimeFromEvent, onSeek]);
 
   const handleTouchStart = useCallback((e: TouchEvent) => {
-    const time = getTimeFromEvent(e);
-    onSeek(time);
+    draggingRef.current = true;
+    onSeek(getTimeFromEvent(e));
   }, [getTimeFromEvent, onSeek]);
+
+  // Touch drag: touch events keep targeting the element the touch started on, so a
+  // continuous scrub works without document listeners. touch-action:none (below)
+  // stops the page from scrolling under the finger.
+  const handleTouchMove = useCallback((e: TouchEvent) => {
+    if (draggingRef.current) onSeek(getTimeFromEvent(e));
+  }, [getTimeFromEvent, onSeek]);
+
+  const handleTouchEnd = useCallback(() => {
+    draggingRef.current = false;
+  }, []);
+
+  // Keyboard support for the slider role — arrows/Home/End seek.
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    const step = 5;
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft') next = Math.max(0, state.currentTime - step);
+    else if (e.key === 'ArrowRight') next = Math.min(totalDuration, state.currentTime + step);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = totalDuration;
+    if (next !== null) {
+      e.preventDefault();
+      onSeek(next);
+    }
+  }, [state.currentTime, totalDuration, onSeek]);
 
   return (
     <div class="dashcam-timeline">
       <div
         class="timeline-bar-container"
+        style={{ touchAction: 'none' }}
         onMouseDown={handlePointerDown}
         onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        onKeyDown={handleKeyDown}
         ref={trackRef}
         role="slider"
         aria-label="Playback position"

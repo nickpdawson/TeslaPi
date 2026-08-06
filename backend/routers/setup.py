@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,12 +73,18 @@ def _write_setup_state(state: dict) -> None:
     _SETUP_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+# Setup endpoints are reachable before auth exists and while setup is incomplete,
+# so detected config must have its secrets masked (unlike the raw values the setup
+# flow writes). Uses the same sensitivity/mask definition as config read + write.
 def _detect_existing_config() -> dict:
-    """Try to read existing teslausb_setup_variables.conf."""
+    """Read existing teslausb_setup_variables.conf, with secret values masked."""
     try:
         raw = config_manager.read_config()
         if raw:
-            return raw
+            return {
+                k: (config_manager.MASK if (config_manager.is_sensitive_key(k) and v) else v)
+                for k, v in raw.items()
+            }
     except Exception as exc:
         logger.debug("No existing config detected: %s", exc)
     return {}

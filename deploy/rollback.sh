@@ -38,7 +38,9 @@ fi
 
 # Track rootfs mount state
 ROOT_WAS_RO=false
-if mount | grep 'on / ' | grep -q 'ro,\|ro)'; then
+# Match `ro` only as a standalone mount option, not the `ro` in `errors=remount-ro`
+# (see install.sh) — the old pattern remounted a normal rw root read-only on exit.
+if mount | grep 'on / ' | grep -qE '\(ro[,)]|,ro[,)]'; then
     ROOT_WAS_RO=true
 fi
 

@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import os
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -21,6 +23,12 @@ _active_sync: dict = {
     "process": None,
     "cancelled": False,
 }
+
+# Serializes any mount/umount of MUSIC_MOUNT across this module and routers/music.py.
+# Without this, the `/api/music/local` endpoint (which mount/umounts the same image
+# read-only to scan it) can race with a running sync and yank the mount out from
+# under rsync mid-transfer.
+_image_mount_lock = asyncio.Lock()
 
 MUSIC_MOUNT = "/mnt/music"
 MUSIC_DEST = "/mnt/music/Music"
@@ -48,45 +56,68 @@ async def start_sync(
     if _active_sync["job_id"] is not None:
         raise RuntimeError("A sync is already in progress")
 
-    async with aiosqlite.connect(db_path) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
+    # Refuse while the library is indexing: a sync marking files synced=1 must not
+    # overlap a re-index resetting synced=0 for changed files, or the reset is lost
+    # (changed file hidden from "Sync New"). They also contend for the share.
+    from backend.services import music_index
+    if music_index.get_indexing_status().get("active"):
+        raise RuntimeError("The music library is indexing; try again once it finishes.")
 
-        # Calculate total files and bytes for selected paths
-        total_files = 0
-        total_bytes = 0
+    # Claim the slot SYNCHRONOUSLY (before any await) so a concurrent sync or an
+    # index trigger can't slip in between the checks above and the claim. Also fixes
+    # the old check-then-set race where two POSTs could both start a sync.
+    _active_sync["job_id"] = -1
+    _active_sync["cancelled"] = False
+    _active_sync["process"] = None
 
-        if mode == "selective" and paths:
-            for path in paths:
-                safe_path = path.rstrip("/") + "%"
+    # NOTE: music sync toggles the USB gadget, which the preserved teslausb
+    # archiveloop daemon also manages. Coordinating the two (so a sync doesn't yank
+    # the gadget mid-archive) is an unresolved Phase 2/3 architectural decision —
+    # see work log. Not gated here because archiveloop is enabled on every normal
+    # install, so a blanket refusal would disable music sync everywhere.
+
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL")
+
+            # Calculate total files and bytes for selected paths
+            total_files = 0
+            total_bytes = 0
+
+            if mode == "selective" and paths:
+                for path in paths:
+                    safe_path = path.rstrip("/") + "%"
+                    async with db.execute(
+                        "SELECT COUNT(*) as cnt, COALESCE(SUM(size_bytes), 0) as sz FROM music_files WHERE path LIKE ?",
+                        (safe_path,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        if row:
+                            total_files += row["cnt"]
+                            total_bytes += row["sz"]
+            else:
                 async with db.execute(
-                    "SELECT COUNT(*) as cnt, COALESCE(SUM(size_bytes), 0) as sz FROM music_files WHERE path LIKE ?",
-                    (safe_path,),
+                    "SELECT COUNT(*) as cnt, COALESCE(SUM(size_bytes), 0) as sz FROM music_files"
                 ) as cursor:
                     row = await cursor.fetchone()
                     if row:
-                        total_files += row["cnt"]
-                        total_bytes += row["sz"]
-        else:
-            async with db.execute(
-                "SELECT COUNT(*) as cnt, COALESCE(SUM(size_bytes), 0) as sz FROM music_files"
-            ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    total_files = row["cnt"]
-                    total_bytes = row["sz"]
+                        total_files = row["cnt"]
+                        total_bytes = row["sz"]
 
-        cursor = await db.execute(
-            """INSERT INTO music_sync_jobs (status, mode, paths_json, files_total, bytes_total, started_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            ("pending", mode, json.dumps(paths), total_files, total_bytes,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        job_id = cursor.lastrowid
-        await db.commit()
+            cursor = await db.execute(
+                """INSERT INTO music_sync_jobs (status, mode, paths_json, files_total, bytes_total, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ("pending", mode, json.dumps(paths), total_files, total_bytes,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            job_id = cursor.lastrowid
+            await db.commit()
+    except Exception:
+        _active_sync["job_id"] = None  # release the claim on failure
+        raise
 
     _active_sync["job_id"] = job_id
-    _active_sync["cancelled"] = False
 
     # Start background task
     asyncio.create_task(_run_sync(job_id, paths, mode, db_path))
@@ -113,20 +144,46 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
         if result.returncode != 0:
             logger.warning("Gadget disable returned %d: %s (may already be disabled)", result.returncode, result.stderr)
 
-        already_mounted_music = False
+        # Tracks whether the music image is confirmed unmounted before we re-present
+        # the gadget. The image must NEVER be re-exported to the car while still
+        # host-mounted read-write (two writers → filesystem corruption).
+        image_released = False
         try:
-            # Step 2: Mount music disk image (skip if already mounted)
-            check = await script_runner.run("mountpoint", ["-q", MUSIC_MOUNT], timeout=5)
-            if check.returncode == 0:
-                logger.info("Sync job %d: music image already mounted", job_id)
-                already_mounted_music = True
-            else:
-                logger.info("Sync job %d: mounting music disk image", job_id)
-                result = await script_runner.run(
-                    "mount", ["-o", "loop", MUSIC_IMAGE, MUSIC_MOUNT], timeout=15,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Failed to mount music image: {result.stderr}")
+            # Step 2: Mount music disk image (skip if already mounted).
+            # Serialize against /api/music/local which mounts the same image RO.
+            async with _image_mount_lock:
+                check = await script_runner.run("mountpoint", ["-q", MUSIC_MOUNT], timeout=5)
+                if check.returncode == 0:
+                    # Leftover mount (e.g. crashed prior run). Reuse it, but we still
+                    # own releasing it before the gadget comes back — see Step 7.
+                    logger.info("Sync job %d: music image already mounted (reusing)", job_id)
+                else:
+                    logger.info("Sync job %d: mounting music disk image", job_id)
+                    # Detach any stale loop devices already bound to the image.
+                    # `mount -o loop` returns 0 but silently fails to establish
+                    # a mountpoint when the file is already loop-attached (e.g.
+                    # left over from gadget setup or a prior crashed run).
+                    losetup = await script_runner.run("losetup", ["-j", MUSIC_IMAGE], timeout=5)
+                    if losetup.returncode == 0 and losetup.stdout.strip():
+                        for line in losetup.stdout.splitlines():
+                            dev = line.split(":", 1)[0].strip()
+                            if dev.startswith("/dev/loop"):
+                                logger.info("Sync job %d: detaching stale loop %s", job_id, dev)
+                                await script_runner.run("losetup", ["-d", dev], timeout=5)
+
+                    result = await script_runner.run(
+                        "mount", ["-o", "loop", MUSIC_IMAGE, MUSIC_MOUNT], timeout=15,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Failed to mount music image: {result.stderr}")
+
+                    # Verify the mount actually took — `mount` can return 0 without
+                    # establishing a mountpoint in pathological loop-device states.
+                    verify = await script_runner.run("mountpoint", ["-q", MUSIC_MOUNT], timeout=5)
+                    if verify.returncode != 0:
+                        raise RuntimeError(
+                            f"mount returned 0 but {MUSIC_MOUNT} is not a mountpoint"
+                        )
 
             # Ensure /Music/ subdirectory exists
             result = await script_runner.run(
@@ -162,6 +219,7 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
                     # This copies EVERYTHING, not just indexed files
                     logger.info("Sync job %d: full sync — rsyncing entire share", job_id)
                     await _run_rsync_full(job_id, db_path)
+                    # _run_rsync_full sets status=completed itself; nothing more to do
                 else:
                     # Selective sync: build file list from DB or filesystem
                     file_list = await _build_file_list(paths, mode, db_path)
@@ -177,35 +235,70 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
                         files_from = f.name
 
                     try:
-                        await _run_rsync(job_id, files_from, db_path)
+                        rc = await _run_rsync(job_id, files_from, db_path)
                     finally:
                         import os
                         os.unlink(files_from)
 
-                # Step 6: Mark synced files in DB
-                async with aiosqlite.connect(db_path) as db:
-                    for path in file_list:
-                        await db.execute(
-                            "UPDATE music_files SET synced = 1 WHERE path = ?",
-                            (path,),
+                    # Mark synced files in DB only when rsync fully transferred them
+                    # (rc 0). On a partial run (23/24) leave them unsynced so the next
+                    # selective sync retries the gaps instead of skipping them forever.
+                    if rc == 0:
+                        async with aiosqlite.connect(db_path) as db:
+                            for path in file_list:
+                                await db.execute(
+                                    "UPDATE music_files SET synced = 1 WHERE path = ?",
+                                    (path,),
+                                )
+                            await db.commit()
+                        await _update_job(db_path, job_id, status="completed")
+                    else:
+                        # Partial transfer (rsync 23/24): some files did not copy.
+                        # Report it honestly as "partial", not "completed", and leave
+                        # those files unsynced so the next sync retries the gaps.
+                        logger.warning(
+                            "Sync job %d: rsync exit %s — partial transfer, files left for retry",
+                            job_id, rc,
                         )
-                    await db.commit()
-
-                await _update_job(db_path, job_id, status="completed")
+                        await _update_job(
+                            db_path, job_id,
+                            status="partial",
+                            error_message=f"Some files could not be copied (rsync code {rc}); they will retry on the next sync.",
+                        )
 
             finally:
-                # Step 7: Unmount music source share and music image
+                # Step 7: Unmount source share and RELEASE the music image. We always
+                # release it (regardless of who mounted it) and verify the release,
+                # because Step 8 must not re-present a still-mounted RW image.
                 logger.info("Sync job %d: unmounting", job_id)
-                await share_browser.unmount_share(SHARE_MOUNT)
-                if not already_mounted_music:
-                    await script_runner.run("umount", [MUSIC_MOUNT], timeout=15)
+                share_released = await share_browser.unmount_share(SHARE_MOUNT)
+                if not share_released:
+                    logger.warning("Sync job %d: source share unmount reported failure", job_id)
+                async with _image_mount_lock:
+                    image_released = await _ensure_image_unmounted(f"Sync job {job_id}")
 
         finally:
-            # Step 8: Re-enable USB gadget (re-presents all drives to Tesla)
-            logger.info("Sync job %d: re-enabling USB gadget", job_id)
-            await script_runner.run(
-                "bash", [GADGET_ENABLE], timeout=15,
-            )
+            # Step 8: Re-enable the USB gadget — but ONLY if the music image is
+            # confirmed unmounted. Re-presenting a still-host-mounted RW image to the
+            # car means two writers on one FAT filesystem → corruption. If we can't
+            # release it, leave the gadget down (car temporarily loses its drives,
+            # which is recoverable) and surface a hard failure.
+            if image_released:
+                logger.info("Sync job %d: re-enabling USB gadget", job_id)
+                await script_runner.run(
+                    "bash", [GADGET_ENABLE], timeout=15,
+                )
+            else:
+                logger.critical(
+                    "Sync job %d: music image could NOT be unmounted; NOT re-enabling "
+                    "the gadget to avoid corrupting the drive. Manual intervention needed.",
+                    job_id,
+                )
+                await _update_job(
+                    db_path, job_id,
+                    status="failed",
+                    error_message="Music image could not be unmounted after sync; gadget left disabled to prevent corruption. Reboot or unmount /mnt/music manually.",
+                )
 
     except asyncio.CancelledError:
         logger.info("Sync job %d: cancelled", job_id)
@@ -328,113 +421,516 @@ async def _build_file_list(paths: list[str], mode: str, db_path: str) -> list[st
     return file_list
 
 
-async def _run_rsync_full(job_id: int, db_path: str) -> None:
-    """Run a full rsync of the entire share — no --files-from, no index dependency."""
-    # Safety check: verify both mounts are actually in place
+# rsync --info=progress2 emits a single periodic line, separated by \r:
+#   "       1,234,567,890   3%   12.34MB/s    0:01:23 (xfr#42, to-chk=12345/67890)"
+# to-chk=A/B means A files remain to check out of B total. Files done = B - A.
+# ir-chk=A/B is the same shape during incremental file-list build.
+_PROGRESS2_RE = re.compile(
+    rb"^\s*([\d,]+)\s+\d+%\s+\S+\s+\S+\s+\(xfr#(\d+),\s+(?:to-chk|ir-chk)=(\d+)/(\d+)\)"
+)
+
+
+def _parse_progress2(line: bytes) -> tuple[int, int] | None:
+    """Parse one rsync ``--info=progress2`` line into ``(run_bytes, files_done)``.
+
+    rsync emits ``<bytes> <pct>% <rate> <elapsed> (xfr#N, to-chk=R/T)`` (or ``ir-chk``
+    during incremental recursion), separated by ``\\r``. Files done = total - remaining.
+    Returns None for any non-progress line so the caller skips it.
+    """
+    m = _PROGRESS2_RE.match(line)
+    if not m:
+        return None
+    try:
+        run_bytes = int(m.group(1).replace(b",", b""))
+        remaining = int(m.group(3))
+        total = int(m.group(4))
+    except (ValueError, IndexError):
+        return None
+    return run_bytes, max(0, total - remaining)
+
+# Watchdog timing
+_STALL_TIMEOUT_SEC = 90.0      # rsync stdout silent for this long → assume wedged
+_RETRY_BACKOFF_SEC = 5.0       # wait between rsync restart attempts
+_MAX_RSYNC_RESTARTS = 50       # cap retries so a truly broken state doesn't loop forever
+_SHARE_WAIT_TIMEOUT_SEC = 3600 # how long we'll wait for the source share to come back
+
+
+class _RsyncStalled(Exception):
+    """Raised when rsync produces no stdout for too long — pipeline likely wedged."""
+
+
+async def _stream_rsync_progress(
+    proc,
+    db_path: str,
+    job_id: int,
+    *,
+    bytes_offset: int = 0,
+    stall_timeout: float = _STALL_TIMEOUT_SEC,
+    progress: dict | None = None,
+) -> tuple[int, int]:
+    """Read rsync stdout in raw chunks, parse --info=progress2 lines, update DB ~1Hz.
+
+    rsync uses \\r (not \\n) between progress updates, so async-for-line doesn't
+    yield until process exit. Read raw bytes and split on both separators.
+
+    ``bytes_offset`` is the cumulative bytes transferred by PRIOR rsync runs; it is
+    added to this run's byte count only for the DB write, so the UI total stays
+    monotonic across restarts. The returned/holder byte count is THIS run only.
+
+    ``progress`` (if given) is updated in place with ``{"run_bytes", "files"}`` on
+    every parse and before raising ``_RsyncStalled`` — the supervisor reads it to
+    keep the cumulative total correct even when a run is killed mid-transfer.
+
+    Raises ``_RsyncStalled`` if rsync produces no output for ``stall_timeout``
+    seconds — the supervisor uses this signal to kill+retry.
+
+    Returns ``(last_files, run_bytes)`` — run_bytes is this run's transfer only.
+    """
+    last_update = 0.0
+    last_files = 0
+    run_bytes = 0
+    buf = b""
+
+    def _publish() -> None:
+        if progress is not None:
+            progress["run_bytes"] = run_bytes
+            progress["files"] = last_files
+
+    while True:
+        try:
+            chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=stall_timeout)
+        except asyncio.TimeoutError:
+            _publish()
+            raise _RsyncStalled(f"rsync silent for {stall_timeout:.0f}s")
+
+        if not chunk:
+            break  # rsync closed stdout — process is exiting
+        if _active_sync["cancelled"]:
+            _publish()
+            proc.kill()
+            await proc.wait()
+            raise asyncio.CancelledError()
+
+        buf += chunk
+        parts = re.split(rb"[\r\n]", buf)
+        buf = parts[-1]
+
+        for line in parts[:-1]:
+            parsed = _parse_progress2(line)
+            if parsed is None:
+                continue
+            run_bytes, last_files = parsed
+
+        _publish()
+        now = time.monotonic()
+        if now - last_update >= 1.0:
+            await _update_job(
+                db_path, job_id,
+                files_copied=last_files,
+                bytes_copied=bytes_offset + run_bytes,
+            )
+            last_update = now
+
+    # Flush final progress
+    _publish()
+    await _update_job(
+        db_path, job_id,
+        files_copied=last_files,
+        bytes_copied=bytes_offset + run_bytes,
+    )
+    return last_files, run_bytes
+
+
+async def _share_responsive(timeout_sec: float = 8.0) -> bool:
+    """Quick liveness probe of the music source share. True if a stat returns
+    promptly. False on timeout, error, or share unmounted."""
+    if not await share_browser.is_mounted(SHARE_MOUNT):
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "stat", SHARE_MOUNT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
+        return proc.returncode == 0
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+async def _remount_music_share() -> bool:
+    """Force-remount the music source share. Used when CIFS state is wedged.
+    Returns True on success."""
+    logger.info("Force-remounting music source share")
+    try:
+        await share_browser.unmount_share(SHARE_MOUNT)
+    except Exception as exc:
+        logger.warning("unmount of %s failed (continuing): %s", SHARE_MOUNT, exc)
+
+    cfg = share_browser.get_music_share_config()
+    if not cfg:
+        return False
+    import os as _os
+    _os.makedirs(SHARE_MOUNT, exist_ok=True)
+    try:
+        return await share_browser.mount_share(
+            share_type=cfg.get("share_type", cfg.get("type", "cifs")),
+            server=cfg.get("server", ""),
+            path=cfg.get("share_name", cfg.get("path", "")),
+            mountpoint=SHARE_MOUNT,
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            domain=cfg.get("domain", ""),
+        )
+    except Exception as exc:
+        logger.warning("remount of music share failed: %s", exc)
+        return False
+
+
+async def _wait_for_share_reachable(job_id: int, total_timeout: float = _SHARE_WAIT_TIMEOUT_SEC) -> None:
+    """Block until the music source share is responsive. Polls every 10s, attempting
+    a remount each iteration. Raises RuntimeError after total_timeout."""
+    deadline = time.monotonic() + total_timeout
+    attempt = 0
+    while time.monotonic() < deadline:
+        if _active_sync["cancelled"]:
+            raise asyncio.CancelledError()
+
+        if await _share_responsive():
+            if attempt > 0:
+                logger.info("Sync job %d: share recovered after %d attempt(s)", job_id, attempt)
+            return
+
+        attempt += 1
+        if attempt == 1 or attempt % 6 == 0:  # log first try and every minute
+            logger.warning("Sync job %d: music share unresponsive, attempt %d", job_id, attempt)
+
+        await _remount_music_share()
+        await asyncio.sleep(10)
+
+    raise RuntimeError(f"music share unreachable for {total_timeout:.0f}s")
+
+
+async def _drain_stream(stream, limit: int = 65536) -> str:
+    """Read a subprocess pipe to EOF, keeping at most the last ``limit`` bytes.
+
+    Draining stderr concurrently with stdout is essential: rsync writes warnings
+    (vanished files, CIFS I/O errors) to stderr, and if that ~64 KB pipe fills,
+    rsync blocks on write, stops emitting stdout progress, and the stall watchdog
+    fires a false positive. Keeping only the tail bounds memory on a chatty run.
+    """
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > limit:
+                tail = b"".join(chunks)[-limit:]
+                chunks = [tail]
+                size = len(tail)
+    except Exception:  # pragma: no cover - best-effort drain
+        pass
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+# rsync exit-code policy for the supervisor. Partial codes (vanished/unreadable
+# files) are handed back without endless retries; network-flavored codes get a fresh
+# CIFS mount before retrying.
+_RSYNC_PARTIAL_CODES = frozenset({23, 24})
+_RSYNC_REMOUNT_CODES = frozenset({30, 35, 12, 11, 14})
+
+
+def _classify_rsync_exit(rc: int | None) -> str:
+    """Map an rsync exit code to the supervisor's action:
+    'success' (0), 'partial' (23/24 — hand back, don't retry forever),
+    'retry_remount' (network-flavored — remount then retry), or 'retry' (other)."""
+    if rc == 0:
+        return "success"
+    if rc in _RSYNC_PARTIAL_CODES:
+        return "partial"
+    if rc in _RSYNC_REMOUNT_CODES:
+        return "retry_remount"
+    return "retry"
+
+
+async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> tuple[bool, int | None, str]:
+    """Run rsync with stall-detection, concurrent stderr draining, auto-resume on
+    share outage, and monotonic cumulative byte accounting.
+
+    ``extra_args`` are inserted before the src/dst (e.g. ``--files-from=...``).
+    On a stall (no stdout for _STALL_TIMEOUT_SEC) or a retryable non-success exit,
+    rsync is killed, the share is re-checked/remounted, and rsync is restarted;
+    ``rsync -a`` skips already-correct files cheaply, so this is robust to repeated
+    WiFi drops. Returns ``(success, final_rc, error)`` where ``success`` is True only
+    on exit code 0. Partial codes (23/24) return ``(False, rc, error)`` without
+    endless retries so the caller decides how to record them. Propagates
+    ``asyncio.CancelledError`` on user cancel.
+    """
     import os
     check_music = await script_runner.run("mountpoint", ["-q", MUSIC_MOUNT], timeout=5)
-    check_share = await script_runner.run("mountpoint", ["-q", SHARE_MOUNT], timeout=5)
     if check_music.returncode != 0:
         raise RuntimeError(f"Music image not mounted at {MUSIC_MOUNT} — cannot sync")
-    if check_share.returncode != 0:
-        raise RuntimeError(f"Music share not mounted at {SHARE_MOUNT} — cannot sync")
 
-    # Ensure /Music/ subdir exists
     os.makedirs(MUSIC_DEST, exist_ok=True)
 
     cmd = [
         "rsync",
         "-a",
-        "--timeout=300",
+        "--partial",
+        "--timeout=120",
+        "--info=progress2",
+        "--info=name0",
+        *extra_args,
         f"{SHARE_MOUNT}/",
         f"{MUSIC_DEST}/",
     ]
 
-    logger.info("Sync job %d: starting full rsync: %s", job_id, " ".join(cmd))
+    cumulative_bytes = 0
+    last_error = ""
+    last_rc: int | None = None
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _active_sync["process"] = proc
-
-    # For full sync, we can't easily track file-by-file progress.
-    # Just wait for completion and check periodically.
-    stdout, stderr = await proc.communicate()
-
-    if proc.returncode not in (0, 23, 24):
-        logger.error("Sync job %d: full rsync failed (code %d): %s",
-                     job_id, proc.returncode, stderr.decode()[:500])
-        await _update_job(db_path, job_id,
-                          status="failed",
-                          error_message=f"rsync exit code {proc.returncode}: {stderr.decode()[:200]}")
-        return
-
-    logger.info("Sync job %d: full rsync completed (code %d)", job_id, proc.returncode)
-    await _update_job(db_path, job_id, status="completed")
-
-
-async def _run_rsync(job_id: int, files_from: str, db_path: str) -> None:
-    """Run rsync and parse progress output."""
-    cmd = [
-        "rsync",
-        "-av",
-        "--progress",
-        f"--files-from={files_from}",
-        f"{SHARE_MOUNT}/",
-        f"{MUSIC_DEST}/",
-    ]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _active_sync["process"] = proc
-
-    files_copied = 0
-    bytes_copied = 0
-
-    async for line in proc.stdout:
+    for attempt in range(1, _MAX_RSYNC_RESTARTS + 1):
         if _active_sync["cancelled"]:
-            proc.kill()
-            await proc.wait()
             raise asyncio.CancelledError()
 
-        text = line.decode("utf-8", errors="replace").strip()
+        # Make sure the share is reachable before spawning rsync. On retries this
+        # also handles the "Tesla drove away → WiFi gone → CIFS wedged" case.
+        await _wait_for_share_reachable(job_id)
 
-        # Parse rsync progress lines:
-        # "    1,234,567 100%  123.45MB/s    0:00:01 (xfr#1, to-chk=99/100)"
-        if "xfr#" in text:
-            files_copied += 1
-            # Extract bytes from the beginning of the line
-            parts = text.split()
-            if parts:
-                try:
-                    bytes_str = parts[0].replace(",", "")
-                    bytes_copied += int(bytes_str)
-                except (ValueError, IndexError):
-                    pass
+        logger.info("Sync job %d: rsync attempt %d/%d", job_id, attempt, _MAX_RSYNC_RESTARTS)
 
-            if files_copied % 10 == 0:
-                await _update_job(
-                    db_path, job_id,
-                    files_copied=files_copied,
-                    bytes_copied=bytes_copied,
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _active_sync["process"] = proc
+        stderr_task = asyncio.create_task(_drain_stream(proc.stderr))
+        progress = {"run_bytes": 0, "files": 0}
+        stalled = False
+        stderr_text = ""
+
+        try:
+            try:
+                await _stream_rsync_progress(
+                    proc, db_path, job_id,
+                    bytes_offset=cumulative_bytes,
+                    progress=progress,
                 )
+            except _RsyncStalled as exc:
+                stalled = True
+                last_error = f"stalled (attempt {attempt})"
+                logger.warning("Sync job %d: rsync stalled (%s), killing", job_id, exc)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            # Reap the process so it can't linger holding the mount busy.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                logger.error("Sync job %d: rsync didn't exit within 15s; killing", job_id)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        finally:
+            # Always account this run's bytes and always reap the stderr drain,
+            # including on the cancel path (CancelledError propagates after this).
+            cumulative_bytes += progress["run_bytes"]
+            try:
+                stderr_text = await asyncio.wait_for(stderr_task, timeout=5)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                stderr_task.cancel()
 
-    await proc.wait()
+        if stalled:
+            await asyncio.sleep(_RETRY_BACKOFF_SEC)
+            # Fresh CIFS connection before the next attempt.
+            await _remount_music_share()
+            continue
 
-    if proc.returncode not in (0, 23):  # 23 = partial transfer (some files vanished)
-        stderr = await proc.stderr.read()
-        raise RuntimeError(f"rsync failed (exit {proc.returncode}): {stderr.decode()}")
+        rc = proc.returncode
+        last_rc = rc
+        kind = _classify_rsync_exit(rc)
+        if kind == "success":
+            logger.info("Sync job %d: rsync completed on attempt %d", job_id, attempt)
+            return True, rc, ""
+        if kind == "partial":
+            # Partial transfer (vanished/unreadable files). Not retried forever —
+            # hand back to the caller to record; a later sync retries the gaps.
+            logger.warning("Sync job %d: rsync partial (code %d): %s", job_id, rc, stderr_text[:200])
+            return False, rc, stderr_text[:200]
 
-    await _update_job(
-        db_path, job_id,
-        files_copied=files_copied,
-        bytes_copied=bytes_copied,
-    )
+        last_error = f"exit {rc}: {stderr_text[:200]}"
+        logger.warning("Sync job %d: rsync exit %d on attempt %d, will retry: %s",
+                       job_id, rc, attempt, stderr_text[:200])
+        await asyncio.sleep(_RETRY_BACKOFF_SEC)
+        # Network-flavored failures benefit from a fresh CIFS mount before retry.
+        if kind == "retry_remount":
+            await _remount_music_share()
+
+    logger.error("Sync job %d: gave up after %d attempts: %s", job_id, _MAX_RSYNC_RESTARTS, last_error)
+    return False, last_rc, f"failed after {_MAX_RSYNC_RESTARTS} attempts: {last_error[:200]}"
+
+
+def _path_mount_state(path: str) -> bool | None:
+    """Definitively report whether ``path`` is a mount point, read from
+    /proc/self/mountinfo (authoritative for this process's mount namespace, which
+    the mount subprocesses share). Returns True (mounted), False (definitively not
+    mounted), or None if it could not be determined. Unlike `mountpoint`'s exit
+    code, a read error is reported as None rather than masquerading as "not
+    mounted" — the caller must treat None as "still mounted" for safety."""
+    try:
+        target = os.path.realpath(path)
+        with open("/proc/self/mountinfo", "r", encoding="utf-8", errors="replace") as fh:
+            return _mountinfo_has_target(fh, target)
+    except Exception:
+        # Any failure to read/parse is undeterminable, not proof of "not mounted".
+        return None
+
+
+def _mountinfo_has_target(lines, target: str) -> bool:
+    """True if ``target`` appears as a mount point in /proc/self/mountinfo ``lines``.
+
+    Per proc(5), the mount point is field index 4 (space-separated). Getting this
+    index wrong would misreport mount state and could green-light re-enabling the USB
+    gadget over a still-mounted image (corruption), so it's isolated + tested.
+    """
+    for line in lines:
+        fields = line.split()
+        if len(fields) > 4 and fields[4] == target:
+            return True
+    return False
+
+
+async def _image_loop_devices() -> list[str] | None:
+    """Return the loop devices currently backed by the music image, or None if it
+    could not be determined. Empty list means none are attached. ``losetup -j``
+    exits 0 with empty output when there are no matches; a non-zero exit is an error
+    we must not mistake for "no loops"."""
+    res = await script_runner.run("losetup", ["-j", MUSIC_IMAGE], timeout=5)
+    if res.returncode != 0:
+        # util-linux `losetup -j` exits 0 (with empty output) when there are simply
+        # no matches, so a non-zero exit is a real error — binary missing, timeout,
+        # permission. We cannot conclude "no loops" from it; report undeterminable
+        # so the caller fails safe (treats the image as still attached).
+        return None
+    devs = []
+    for line in res.stdout.splitlines():
+        dev = line.split(":", 1)[0].strip()
+        if dev.startswith("/dev/loop"):
+            devs.append(dev)
+    return devs
+
+
+async def _detach_image_loops(log_ctx: str) -> bool:
+    """Detach every loop device bound to the music image and CONFIRM none remain.
+    Returns True only when the image is verified free of loop devices; False on any
+    detach failure or if the state can't be confirmed. Safe to call only while the
+    gadget is disabled (the gadget owns no loop then). A lingering loop can write
+    back to the image, so a False result must block re-presenting it to the car."""
+    devs = await _image_loop_devices()
+    if devs is None:
+        logger.warning("%s: could not enumerate loop devices for %s; treating as still attached", log_ctx, MUSIC_IMAGE)
+        return False
+    for dev in devs:
+        logger.info("%s: detaching loop %s", log_ctx, dev)
+        await script_runner.run("losetup", ["-d", dev], timeout=5)
+    remaining = await _image_loop_devices()
+    if remaining is None:
+        logger.warning("%s: could not verify loop detach for %s; treating as still attached", log_ctx, MUSIC_IMAGE)
+        return False
+    if remaining:
+        logger.warning("%s: loop device(s) still bound to %s after detach: %s", log_ctx, MUSIC_IMAGE, remaining)
+        return False
+    return True
+
+
+async def _ensure_image_unmounted(log_ctx: str = "image release", retries: int = 5) -> bool:
+    """Unmount the music image and POSITIVELY confirm it is gone before the gadget is
+    re-presented. Flushes with ``sync`` and retries; returns True only on a definite
+    "not mounted" reading (never on an undeterminable check — that is treated as
+    still mounted so we fail safe). Deliberately does NOT use lazy umount — a lazy
+    detach can leave writes in flight, exactly the corruption we guard against.
+    Caller must hold ``_image_mount_lock``."""
+    for i in range(retries):
+        state = _path_mount_state(MUSIC_MOUNT)
+        if state is False:
+            # Confirmed unmounted. Only declare it released once we've also verified
+            # no loop device is still bound to the image — a lingering loop can write
+            # back behind the gadget's back. A detach failure keeps us in the retry
+            # loop (and ultimately returns False → gadget stays down).
+            if await _detach_image_loops(log_ctx):
+                return True
+            logger.warning(
+                "%s: %s unmounted but a loop device is still attached (attempt %d/%d)",
+                log_ctx, MUSIC_MOUNT, i + 1, retries,
+            )
+            await asyncio.sleep(1)
+            continue
+        if state is None:
+            logger.warning(
+                "%s: could not determine mount state of %s (attempt %d/%d); treating as still mounted",
+                log_ctx, MUSIC_MOUNT, i + 1, retries,
+            )
+        else:  # definitely mounted — flush and unmount
+            await script_runner.run("sync", [], timeout=30)
+            res = await script_runner.run("umount", [MUSIC_MOUNT], timeout=15)
+            if res.returncode != 0:
+                logger.warning(
+                    "%s: umount %s failed (attempt %d/%d): %s",
+                    log_ctx, MUSIC_MOUNT, i + 1, retries, res.stderr,
+                )
+        await asyncio.sleep(1)
+    return False
+
+
+async def _run_rsync_full(job_id: int, db_path: str) -> None:
+    """Full rsync of the entire share via the supervised runner."""
+    success, rc, err = await _supervise_rsync(job_id, db_path, [])
+    if success:
+        logger.info("Sync job %d: full rsync completed", job_id)
+        # Deliberately do NOT bulk-mark synced here. Marking based on a filesystem
+        # snapshot is a fragile optimization: a blanket mark hides uncopied files,
+        # and a SELECT-then-UPDATE races a concurrent re-index (which resets synced=0
+        # when it detects a changed file) — overwriting that reset would permanently
+        # hide the changed file from "Sync New". Leaving synced untouched is safe:
+        # the next "Sync New" re-offers not-yet-synced files, and its selective rsync
+        # skips already-copied ones (near no-op) while correctly marking what it
+        # copies. Under-marking costs a cheap re-scan; over-marking loses data.
+        await _update_job(db_path, job_id, status="completed")
+        return
+    if rc in (23, 24):
+        # Partial transfer — report honestly rather than as a clean success.
+        logger.warning("Sync job %d: full rsync partial (code %s)", job_id, rc)
+        await _update_job(
+            db_path, job_id,
+            status="partial",
+            error_message=f"Some files could not be copied (rsync code {rc}); they will retry on the next sync.",
+        )
+        return
+    await _update_job(db_path, job_id, status="failed", error_message=err)
+
+
+async def _run_rsync(job_id: int, files_from: str, db_path: str) -> int:
+    """Selective rsync via the supervised runner. Returns the final rsync exit code;
+    raises RuntimeError on a hard (non-partial) failure so the caller marks the job
+    failed. rc 0 = fully transferred; 23/24 = partial (some files left for retry)."""
+    success, rc, err = await _supervise_rsync(job_id, db_path, [f"--files-from={files_from}"])
+    if not success and rc not in (23, 24):
+        raise RuntimeError(f"rsync failed: {err}")
+    return rc if rc is not None else 0
 
 
 async def get_sync_status(db_path: str, job_id: int | None = None) -> dict | None:
@@ -509,7 +1005,7 @@ async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
         elif key == "status":
             set_clauses.append("status = ?")
             values.append(val)
-            if val in ("completed", "failed", "cancelled"):
+            if val in ("completed", "failed", "cancelled", "partial"):
                 set_clauses.append("completed_at = ?")
                 values.append(datetime.now(timezone.utc).isoformat())
         else:

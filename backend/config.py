@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     log_dir: str = "/var/log"
     static_dir: str = "frontend/dist"
 
+    # Manually-uploaded update tarballs are extracted and their install.sh runs as
+    # root. Until updates are signature-verified (and/or the API is authenticated),
+    # that is unauthenticated remote root execution, so it is OFF by default. An
+    # operator who understands the risk can set TESLAPI_ALLOW_UNSIGNED_UPDATES=true.
+    allow_unsigned_updates: bool = False
+
     model_config = {
         "env_prefix": "TESLAPI_",
         "env_file": ".env",

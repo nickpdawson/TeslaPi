@@ -21,13 +21,18 @@ _ALLOWED_LOGS = {
     "dmesg": "/var/log/dmesg",
 }
 
+# Services checked by the "services" diagnostic — a fixed allowlist so the name is
+# never attacker-influenced. These are the units TeslaPi's install enables.
+_DIAG_SERVICES = ("teslapi.service", "teslausb.service", "nginx.service")
+
 
 @router.get("/diagnostics")
 async def run_diagnostics() -> dict:
-    """Run system diagnostics (wraps diagnose.sh).
+    """Run system diagnostics with bounded, allowlisted probes.
 
-    Returns structured diagnostics data including storage, network,
-    gadget status, and recent logs.
+    Returns a structured check per area: storage, network, gadget, temperature, and
+    services — the same set the UI expects. (There is no run/diagnose.sh; the checks
+    below are the real implementation.)
     """
     if settings.dev_mode:
         return {
@@ -40,12 +45,6 @@ async def run_diagnostics() -> dict:
                 "services": {"status": "ok", "details": "All services running"},
             },
         }
-
-    # Run the diagnose script if available
-    result = await script_runner.run(
-        "bash", ["-c", "test -f run/diagnose.sh && bash run/diagnose.sh || echo 'diagnose.sh not found'"],
-        timeout=60,
-    )
 
     checks: dict[str, dict[str, str]] = {}
 
@@ -63,7 +62,17 @@ async def run_diagnostics() -> dict:
     )
     checks["network"] = {
         "status": "ok" if "reachable" in ping_result.stdout else "warning",
-        "details": ping_result.stdout,
+        "details": ping_result.stdout.strip(),
+    }
+
+    # Gadget check — is the USB mass-storage gadget presented to the car?
+    gadget_result = await script_runner.run(
+        "bash", ["-c", "ls /sys/kernel/config/usb_gadget/ 2>/dev/null"], timeout=5
+    )
+    gadget_active = bool(gadget_result.stdout.strip())
+    checks["gadget"] = {
+        "status": "ok" if gadget_active else "warning",
+        "details": "USB gadget active" if gadget_active else "USB gadget not configured",
     }
 
     # Temperature
@@ -79,11 +88,26 @@ async def run_diagnostics() -> dict:
             }
         except ValueError:
             checks["temperature"] = {"status": "unknown", "details": "Could not read temperature"}
+    else:
+        checks["temperature"] = {"status": "unknown", "details": "Could not read temperature"}
+
+    # Services check — each unit name comes from the fixed allowlist above.
+    states = []
+    all_active = True
+    for svc in _DIAG_SERVICES:
+        r = await script_runner.run("systemctl", ["is-active", svc], timeout=5)
+        state = r.stdout.strip() or "unknown"
+        if state != "active":
+            all_active = False
+        states.append(f"{svc}: {state}")
+    checks["services"] = {
+        "status": "ok" if all_active else "warning",
+        "details": "; ".join(states),
+    }
 
     return {
         "status": "ok" if all(c["status"] == "ok" for c in checks.values()) else "warning",
         "checks": checks,
-        "diagnose_output": result.stdout[:2000] if result.returncode == 0 else None,
     }
 
 

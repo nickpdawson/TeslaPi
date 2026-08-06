@@ -7,9 +7,11 @@ network such as a mobile hotspot.
 In dev mode every method returns realistic mock data.
 """
 
+import ipaddress
 import logging
 import os
 import re
+import shlex
 import textwrap
 from pathlib import Path
 
@@ -18,6 +20,135 @@ from backend.models.schemas import WireGuardConfig, WireGuardStatus
 from backend.services import script_runner
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Input validation — every WireGuard field is written into a config file and
+# some are `source`d by a root dispatcher, so reject anything malformed (a stray
+# newline could inject a wg directive; `$()`/backticks in a sourced value would
+# run as root). We also NEVER build shell strings from these — see _sudo_write.
+# ---------------------------------------------------------------------------
+
+_WG_KEY_RE = re.compile(r'[A-Za-z0-9+/]{43}=')          # base64-encoded 32-byte key
+_ENDPOINT_RE = re.compile(r'(?:[A-Za-z0-9.\-]+|\[[0-9A-Fa-f:]+\]):\d{1,5}')  # host:port
+_IPLIST_RE = re.compile(r'[0-9A-Fa-f:.,/ ]*')           # comma/space IPv4/IPv6/CIDR list
+
+
+def _valid_wg_key(v: str) -> bool:
+    return bool(v) and _WG_KEY_RE.fullmatch(v) is not None
+
+
+def _valid_endpoint(v: str) -> bool:
+    return bool(v) and _ENDPOINT_RE.fullmatch(v) is not None
+
+
+def _valid_iplist(v: str) -> bool:
+    # Empty is allowed (dns is optional); otherwise only IP/CIDR-list characters.
+    return _IPLIST_RE.fullmatch(v or "") is not None
+
+
+async def _read_stored_private_key() -> str:
+    """Read the server-stored WireGuard private key written by /generate-keys.
+    It lives in the root-owned config dir, so read it via sudo. Returns '' if it
+    doesn't exist yet (caller then reports "generate keys first")."""
+    res = await script_runner.run("sudo", ["cat", str(WG_PRIVATE_KEY_PATH)], timeout=5)
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return ""
+
+
+async def _read_active_config_private_key() -> str:
+    """Extract the PrivateKey from the live WireGuard config, so an empty-key save
+    (an edit) preserves the ACTIVE tunnel identity instead of silently swapping it
+    for whatever /generate-keys last wrote. Returns '' if there's no active config."""
+    res = await script_runner.run("sudo", ["cat", str(WG_CONFIG_PATH)], timeout=5)
+    if res.returncode != 0:
+        return ""
+    for line in res.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("privatekey"):
+            _, _, value = stripped.partition("=")
+            return value.strip()
+    return ""
+
+
+async def _read_active_config_text() -> str | None:
+    """Return the full current WireGuard config file text, or None if it can't be
+    read. Used to snapshot a working config before overwriting it, so a failed
+    reload can roll back instead of stranding the Pi with a broken tunnel."""
+    res = await script_runner.run("sudo", ["cat", str(WG_CONFIG_PATH)], timeout=5)
+    if res.returncode != 0:
+        return None
+    return res.stdout
+
+
+def _has_ip_networks(value: str) -> bool:
+    """True if *value* is a comma/space-separated list in which every token parses
+    as a real IP network (IPv4/IPv6, with or without prefix) and there is at least
+    one. Stricter than the charset allowlist ``_valid_iplist`` — it rejects a
+    truncated read that severed a value mid-token (e.g. ``10.0.0``), which is exactly
+    the corruption the restorability check guards against."""
+    tokens = [t for t in re.split(r'[,\s]+', value.strip()) if t]
+    if not tokens:
+        return False
+    for token in tokens:
+        try:
+            ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            return False
+    return True
+
+
+def _snapshot_is_restorable(text: str | None) -> bool:
+    """A rollback snapshot is only useful if restoring it brings back a FUNCTIONAL
+    tunnel home. An interface that comes up with no address, or a peer with no
+    reachable endpoint, strands the Pi just as badly as a config that won't come up
+    at all — so require the full routable set: a valid [Interface] PrivateKey and
+    Address, plus a [Peer] PublicKey, Endpoint, and AllowedIPs. Without AllowedIPs
+    the tunnel comes up but installs no routes, so nothing reaches home. Anything
+    short of the complete routable set is treated as no rollback target. (These are
+    every field needed to route home; keepalive and DNS are optional.)"""
+    if not text:
+        return False
+    has_private = has_address = has_public = has_endpoint = has_allowed = False
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "privatekey" and _valid_wg_key(value):
+            has_private = True
+        elif key == "address" and _has_ip_networks(value):
+            has_address = True
+        elif key == "publickey" and _valid_wg_key(value):
+            has_public = True
+        elif key == "endpoint" and _valid_endpoint(value):
+            has_endpoint = True
+        elif key == "allowedips" and _has_ip_networks(value):
+            has_allowed = True
+    return has_private and has_address and has_public and has_endpoint and has_allowed
+
+
+async def _interface_is_active() -> bool:
+    """True if the WireGuard interface is currently up (the kernel has it loaded).
+    A live interface keeps its running config until reloaded, so configure() uses
+    this to decide whether a written change needs to be reapplied to the tunnel."""
+    res = await script_runner.run("wg", ["show", WG_INTERFACE], timeout=10)
+    return res.returncode == 0
+
+
+async def _sudo_write(dest: Path, content: str, mode: str) -> bool:
+    """Write ``content`` to a root-owned path via ``sudo tee`` with the content on
+    stdin — never through a shell — then ``sudo chmod``. Returns True on success."""
+    tee = await script_runner.run("sudo", ["tee", str(dest)], input_data=content, timeout=10)
+    if tee.returncode != 0:
+        logger.error("Failed to write %s: %s", dest, tee.stderr)
+        return False
+    chmod = await script_runner.run("sudo", ["chmod", mode, str(dest)], timeout=10)
+    if chmod.returncode != 0:
+        logger.error("Failed to chmod %s: %s", dest, chmod.stderr)
+        return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -197,15 +328,50 @@ class WireGuardManager:
             logger.info("Dev mode: pretending to write WireGuard config")
             return True
 
+        # The UI never sends the private key — it's generated and stored server-side
+        # by /generate-keys (never exposed to the browser). When it's omitted, the
+        # UI sets use_generated_key to signal intent:
+        #   - use_generated_key=True  → the user just generated keys; apply the stored
+        #     key so regeneration actually takes effect.
+        #   - use_generated_key=False → an edit (e.g. change the endpoint); preserve
+        #     the key already in the ACTIVE config so the tunnel identity never
+        #     silently swaps. Fall back to the stored key for first-time setup, when
+        #     no active config exists yet.
+        private_key = config.private_key
+        if not private_key and config.use_generated_key:
+            private_key = await _read_stored_private_key()
+        if not private_key:
+            private_key = await _read_active_config_private_key()
+        if not private_key:
+            private_key = await _read_stored_private_key()
+
         # Validate required fields
-        if not config.private_key or not config.peer_public_key or not config.peer_endpoint:
-            logger.error("WireGuard config missing required fields")
+        if not private_key or not config.peer_public_key or not config.peer_endpoint:
+            logger.error("WireGuard config missing required fields "
+                         "(no private key — generate keys first?)")
+            return False
+
+        # Validate every field before it reaches the config file.
+        if not _valid_wg_key(private_key) or not _valid_wg_key(config.peer_public_key):
+            logger.error("Invalid WireGuard key format")
+            return False
+        if not _valid_endpoint(config.peer_endpoint):
+            logger.error("Invalid WireGuard endpoint")
+            return False
+        if not (_valid_iplist(config.address) and _valid_iplist(config.allowed_ips)
+                and _valid_iplist(config.dns or "")):
+            logger.error("Invalid WireGuard address/allowed_ips/dns")
+            return False
+        try:
+            keepalive = int(config.persistent_keepalive)
+        except (TypeError, ValueError):
+            logger.error("Invalid persistent_keepalive")
             return False
 
         # Build config file content
         iface_section = f"""\
 [Interface]
-PrivateKey = {config.private_key}
+PrivateKey = {private_key}
 Address = {config.address}"""
 
         if config.dns:
@@ -216,7 +382,7 @@ Address = {config.address}"""
 PublicKey = {config.peer_public_key}
 Endpoint = {config.peer_endpoint}
 AllowedIPs = {config.allowed_ips}
-PersistentKeepalive = {config.persistent_keepalive}"""
+PersistentKeepalive = {keepalive}"""
 
         conf_content = f"{iface_section}\n\n{peer_section}\n"
 
@@ -227,17 +393,56 @@ PersistentKeepalive = {config.persistent_keepalive}"""
             logger.error("Cannot create wireguard config dir: %s", exc)
             return False
 
-        # Write via sudo tee (config dir is root-owned)
-        result = await script_runner.run(
-            "bash",
-            ["-c", f"echo '{conf_content}' | sudo tee {WG_CONFIG_PATH} > /dev/null && sudo chmod 600 {WG_CONFIG_PATH}"],
-            timeout=10,
-        )
-        if result.returncode != 0:
-            logger.error("Failed to write WireGuard config: %s", result.stderr)
+        # If the tunnel is up, snapshot its working config BEFORE overwriting it so
+        # a bad new config can be rolled back — this Pi may be reachable only via
+        # this tunnel, so a failed reload must not strand it with a down interface.
+        was_active = await _interface_is_active()
+        previous_config = await _read_active_config_text() if was_active else None
+
+        # Refuse to overwrite a LIVE tunnel's config unless we captured a RESTORABLE
+        # rollback snapshot — missing, empty, or truncated (no PrivateKey/PublicKey)
+        # is no rollback target at all, and a bad new config would then strand the Pi
+        # with no way back. Leave the working tunnel untouched and report failure.
+        if was_active and not _snapshot_is_restorable(previous_config):
+            logger.error("Refusing to update the active WireGuard config: could not "
+                         "read a restorable current config to enable rollback")
+            return False
+
+        # Write via sudo tee with content on stdin (never a shell string).
+        if not await _sudo_write(WG_CONFIG_PATH, conf_content, "600"):
             return False
 
         logger.info("WireGuard config written to %s", WG_CONFIG_PATH)
+
+        # A running interface keeps its old config (key, endpoint, peer) until it's
+        # reloaded — so writing the file alone would leave a regenerated key or a
+        # changed endpoint inert on the live tunnel. If it's up, bounce it so the
+        # new config actually takes effect, and roll back on any failure.
+        if was_active:
+            logger.info("Reloading active WireGuard interface to apply new config")
+            if not await WireGuardManager.disable():
+                # Still up on the OLD config in the kernel — make the file match
+                # what's running so on-disk state is consistent, then fail.
+                logger.error("Failed to bring %s down to apply new config", WG_INTERFACE)
+                if previous_config is not None:
+                    await _sudo_write(WG_CONFIG_PATH, previous_config, "600")
+                return False
+            if not await WireGuardManager.enable():
+                # New config wouldn't come up and the interface is now DOWN. Restore
+                # the last-known-good config and bring THAT back up.
+                logger.error("New WireGuard config failed to activate; rolling back")
+                if previous_config is not None and await _sudo_write(
+                    WG_CONFIG_PATH, previous_config, "600"
+                ):
+                    if await WireGuardManager.enable():
+                        logger.info("Rolled back to the previous WireGuard config")
+                    else:
+                        logger.error("Rollback config failed to activate — tunnel is down")
+                else:
+                    logger.error("No previous config to roll back to — tunnel is down")
+                return False
+            logger.info("WireGuard interface %s reloaded with new config", WG_INTERFACE)
+
         return True
 
     @staticmethod
@@ -291,6 +496,13 @@ PersistentKeepalive = {config.persistent_keepalive}"""
             )
             return True
 
+        # Validate the SSID: reject control characters and cap the length. The value
+        # is written shlex-quoted because the dispatcher `source`s this file — an
+        # unquoted `$(...)`/backtick in an SSID would otherwise run as root.
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in home_ssid) or len(home_ssid.encode("utf-8")) > 64:
+            logger.error("Invalid home_ssid")
+            return False
+
         # Write the auto config file
         try:
             AUTO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -303,16 +515,10 @@ PersistentKeepalive = {config.persistent_keepalive}"""
             # Managed by TeslaPi -- do not edit manually
             ENABLED={"true" if enabled else "false"}
             ONLY_NON_HOME={"true" if only_non_home else "false"}
-            HOME_SSID="{home_ssid}"
+            HOME_SSID={shlex.quote(home_ssid)}
         """)
 
-        result = await script_runner.run(
-            "bash",
-            ["-c", f"echo '{config_content}' | sudo tee {AUTO_CONFIG_PATH} > /dev/null"],
-            timeout=10,
-        )
-        if result.returncode != 0:
-            logger.error("Failed to write auto config: %s", result.stderr)
+        if not await _sudo_write(AUTO_CONFIG_PATH, config_content, "644"):
             return False
 
         # Install or remove the dispatcher script
@@ -354,17 +560,10 @@ PersistentKeepalive = {config.persistent_keepalive}"""
                 fi
             """)
 
-            result = await script_runner.run(
-                "bash",
-                [
-                    "-c",
-                    f"echo '{dispatcher_content}' | sudo tee {DISPATCHER_SCRIPT} > /dev/null "
-                    f"&& sudo chmod 755 {DISPATCHER_SCRIPT}",
-                ],
-                timeout=10,
-            )
-            if result.returncode != 0:
-                logger.error("Failed to install dispatcher script: %s", result.stderr)
+            # Dispatcher content is static (only our own constants), but write it via
+            # stdin too for consistency and to drop the `echo '...'` shell pattern.
+            if not await _sudo_write(DISPATCHER_SCRIPT, dispatcher_content, "755"):
+                logger.error("Failed to install dispatcher script")
                 return False
             logger.info("WireGuard auto-connect dispatcher installed")
         else:

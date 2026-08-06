@@ -159,7 +159,7 @@
 .app-header__inner {
   display: flex;
   align-items: center;
-  height: 56px;
+  height: var(--header-height);
   max-width: 1200px;
   margin-left: auto;
   margin-right: auto;
@@ -221,7 +221,7 @@
 .app-main {
   padding-top: var(--space-6);
   padding-bottom: var(--space-12);
-  min-height: calc(100vh - 64px);
+  min-height: calc(100vh - var(--header-height));
 }
 
 /* --- Toast Container --- */
@@ -296,6 +296,23 @@
   padding: var(--space-1) var(--space-3);
   font-size: var(--text-xs);
   min-height: 36px;
+}
+
+/* Accent button — same as primary; several components use btn--accent. */
+.btn--accent {
+  background: var(--color-accent);
+  color: white;
+}
+
+.btn--accent:hover {
+  background: var(--color-accent-hover);
+}
+
+/* Extra-small compact button (secondary list actions like select-all/clear). */
+.btn--xs {
+  padding: 2px var(--space-2);
+  font-size: var(--text-xs);
+  min-height: 32px;
 }
 
 .btn > svg {

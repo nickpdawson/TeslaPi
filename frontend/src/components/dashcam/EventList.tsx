@@ -95,6 +95,7 @@ export function EventList({ selectedId, onSelect }: EventListProps) {
               key={opt.value}
               class={`event-filter-btn${filter === opt.value ? ' active' : ''}`}
               onClick={() => setFilter(opt.value)}
+              aria-pressed={filter === opt.value}
             >
               {opt.label}
             </button>

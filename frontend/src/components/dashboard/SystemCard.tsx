@@ -19,7 +19,15 @@ function getTempColor(temp: number): string {
   return 'var(--color-success)';
 }
 
-function getWifiLabel(signal: number): string {
+// A real WiFi RSSI is negative dBm (e.g. -42). 0 (or any non-negative value) is the
+// "no reading" sentinel — the backend couldn't read the signal — so it must NOT be
+// labeled "Excellent"/green, which is what abs(0) <= 50 produced.
+export function wifiSignalKnown(signal: number): boolean {
+  return Number.isFinite(signal) && signal < 0;
+}
+
+export function getWifiLabel(signal: number): string {
+  if (!wifiSignalKnown(signal)) return 'Unknown';
   const abs = Math.abs(signal);
   if (abs <= 50) return 'Excellent';
   if (abs <= 60) return 'Good';
@@ -28,6 +36,7 @@ function getWifiLabel(signal: number): string {
 }
 
 function getWifiColor(signal: number): string {
+  if (!wifiSignalKnown(signal)) return 'var(--color-text-muted)';
   const abs = Math.abs(signal);
   if (abs <= 50) return 'var(--color-success)';
   if (abs <= 60) return 'var(--color-success)';
@@ -196,7 +205,7 @@ export function SystemCard({ system }: SystemCardProps) {
             fontFamily: 'var(--font-mono)',
             color: getWifiColor(system.wifiSignal),
           }}>
-            {system.wifiSignal}
+            {wifiSignalKnown(system.wifiSignal) ? system.wifiSignal : '—'}
           </div>
           <div style={{
             fontSize: 'var(--text-xs)',

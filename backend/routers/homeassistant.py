@@ -6,11 +6,18 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from backend.config import settings
 from backend.database import get_db
 from backend.models.schemas import HAConfig
 from backend.services import ha_client
+
+
+class HATestRequest(BaseModel):
+    """Optional url/token to test before saving; falls back to the saved config."""
+    url: str | None = None
+    token: str | None = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ha")
@@ -23,6 +30,26 @@ def _mask_token(token: str) -> str:
     if len(token) <= 12:
         return _TOKEN_MASK
     return token[:4] + "..." + token[-4:]
+
+
+def _looks_masked(token: str) -> bool:
+    """True if a non-empty token is one of the masked forms produced by _mask_token
+    (the "abcd...wxyz" ellipsis form or the full "********"). A real HA long-lived
+    JWT never contains three consecutive dots, so this won't match a genuine token.
+    An empty string is NOT masked — that means the user deliberately cleared it."""
+    return bool(token) and (token == _TOKEN_MASK or "..." in token)
+
+
+def _preserve_ha_secrets(incoming: HAConfig, saved: HAConfig) -> HAConfig:
+    """The Settings form loads token + mqtt_password masked and echoes them back on
+    save. When a secret comes in masked (unchanged), keep the stored value so a save
+    doesn't overwrite the real credential with the mask (which would also break the
+    live client, since configure_client uses body.token)."""
+    if _looks_masked(incoming.token):
+        incoming.token = saved.token
+    if incoming.mqtt_password == _TOKEN_MASK:
+        incoming.mqtt_password = saved.mqtt_password
+    return incoming
 
 
 async def _load_ha_config() -> HAConfig:
@@ -69,6 +96,10 @@ async def get_ha_config() -> dict[str, Any]:
 @router.put("/config")
 async def update_ha_config(body: HAConfig) -> dict[str, Any]:
     """Save Home Assistant configuration and (re)configure the client."""
+    # Preserve secrets the form echoed back masked, so a save never clobbers the
+    # stored token/mqtt_password (and never configures the client with the mask).
+    saved = await _load_ha_config()
+    body = _preserve_ha_secrets(body, saved)
     await _save_ha_config(body)
 
     # Reconfigure the HA client singleton
@@ -95,27 +126,53 @@ async def update_ha_config(body: HAConfig) -> dict[str, Any]:
 
 
 @router.post("/test")
-async def test_ha_connection() -> dict[str, Any]:
-    """Test the connection to the configured Home Assistant instance."""
-    config = await _load_ha_config()
-    if not config.url or not config.token:
-        raise HTTPException(
-            status_code=400,
-            detail="Home Assistant URL and token must be configured first",
-        )
+async def test_ha_connection(body: HATestRequest | None = None) -> dict[str, Any]:
+    """Test a Home Assistant connection.
+
+    Uses the url/token in the request (so the Settings form can test before saving);
+    falls back to the saved config when they're omitted. Returns the shape the UI
+    reads: {ok, message, haVersion, instanceName}.
+    """
+    url = (body.url if body else None)
+    token = (body.token if body else None)
+
+    # The Settings form loads the token MASKED, so a retest of saved credentials
+    # sends back the mask, not the real token. Treat an empty or masked token (the
+    # "abcd...wxyz" or "********" forms — a real HA JWT never contains "...") as
+    # "use the saved credential".
+    token_is_masked = (not token) or token == _TOKEN_MASK or "..." in token
+    if token_is_masked or not url:
+        cfg = await _load_ha_config()
+        if not url:
+            url = cfg.url
+        if token_is_masked:
+            # SECURITY: only reuse the saved token against the SAVED url. Otherwise a
+            # caller could send a masked token + their own url and receive the real
+            # saved token in the Authorization header — exfiltration. Any mismatch is
+            # refused, INCLUDING when the saved url is empty (so an attacker url can't
+            # slip past a falsy saved url).
+            if url != cfg.url:
+                return {
+                    "ok": False,
+                    "message": "Enter the Home Assistant token to test a different URL.",
+                }
+            token = cfg.token
+
+    if not url or not token:
+        return {"ok": False, "message": "Home Assistant URL and token are required."}
 
     try:
-        client = ha_client.HAClient(url=config.url, token=config.token)
+        client = ha_client.HAClient(url=url, token=token)
         result = await client.test_connection()
         return {
-            "status": "ok",
-            "ha_version": result.get("version", "unknown"),
-            "ha_name": result.get("location_name", result.get("installation_type", "")),
-            "message": result.get("message", ""),
+            "ok": True,
+            "message": result.get("message", "Connected successfully."),
+            "haVersion": result.get("version", "unknown"),
+            "instanceName": result.get("location_name", result.get("installation_type", "")),
         }
     except Exception as exc:
         logger.warning("HA connection test failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Connection failed: {exc}")
+        return {"ok": False, "message": f"Connection failed: {exc}"}
 
 
 @router.get("/entities")

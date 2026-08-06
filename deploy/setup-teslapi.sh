@@ -162,12 +162,17 @@ should_run_step() {
 # Size string (like "40G") to bytes
 size_to_bytes() {
     local size="$1"
-    local num="${size%[GgMm]}"
+    # Strip a known unit suffix (K/M/G/T) to get the number. The old version only
+    # stripped [GgMm], so "1T" and "500K" fell through to $((size * ...)) and errored
+    # on the non-numeric string ("1T" is not valid bash arithmetic).
+    local num="${size%[KkMmGgTt]}"
     local suffix="${size: -1}"
     case "$suffix" in
+        T|t) echo $((num * 1024 * 1024 * 1024 * 1024)) ;;
         G|g) echo $((num * 1024 * 1024 * 1024)) ;;
         M|m) echo $((num * 1024 * 1024)) ;;
-        *)   echo $((size * 1024 * 1024 * 1024)) ;;  # default to GB
+        K|k) echo $((num * 1024)) ;;
+        *)   echo $((size * 1024 * 1024 * 1024)) ;;  # bare number → GB
     esac
 }
 
@@ -374,15 +379,16 @@ step_4_partition_drive() {
     local step=4
     write_progress $step "Partitioning external drive..."
 
-    # Check if drive is already partitioned correctly
-    local mutable_part="${DATA_DRIVE}1"
-    local backingfiles_part="${DATA_DRIVE}2"
-
-    # For NVMe drives, partition naming is different
-    if [[ "$DATA_DRIVE" == *nvme* ]]; then
-        mutable_part="${DATA_DRIVE}p1"
-        backingfiles_part="${DATA_DRIVE}p2"
+    # Partition suffix: a device whose name ends in a digit (nvme0n1, mmcblk0) needs a
+    # 'p' separator (nvme0n1p1, mmcblk0p1); a letter-terminated name (sda) does not
+    # (sda1). The old code special-cased only *nvme*, so eMMC/SD (mmcblk) got the
+    # wrong names (mmcblk01 instead of mmcblk0p1).
+    local part_sep=""
+    if [[ "$DATA_DRIVE" =~ [0-9]$ ]]; then
+        part_sep="p"
     fi
+    local mutable_part="${DATA_DRIVE}${part_sep}1"
+    local backingfiles_part="${DATA_DRIVE}${part_sep}2"
 
     local need_partition=false
 

@@ -56,8 +56,10 @@ export function DashcamPage({}: DashcamPageProps) {
         />
       </div>
 
-      {/* Viewer area */}
-      <div class={mobileTab !== 'viewer' ? 'dashcam-main hidden-mobile' : ''} style={mobileTab !== 'viewer' ? { display: 'none' } : undefined}>
+      {/* Viewer area — always keep dashcam-main; hide only on mobile when the events
+          tab is active (hidden-mobile is inside a max-width media query). The old
+          inline display:none applied at ALL widths, hiding the viewer on desktop. */}
+      <div class={`dashcam-main${mobileTab !== 'viewer' ? ' hidden-mobile' : ''}`}>
         {loadingDetail ? (
           <div class="dashcam-empty-state">
             <div class="spinner" style={{ width: '40px', height: '40px', border: '3px solid rgba(255,255,255,0.1)', borderTopColor: 'rgba(255,255,255,0.6)', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />

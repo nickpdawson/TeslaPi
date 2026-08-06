@@ -121,7 +121,13 @@ export function SystemSettings(_props: SystemSettingsProps) {
     try {
       const info = await get<UpdateInfo>('/updates/check');
       setUpdateInfo(info);
-      if (!info.available) {
+      // Only claim "latest version" when the check actually succeeded — an error or
+      // a 404/no-releases must NOT be shown as "up to date".
+      if (info.status === 'error') {
+        setUpdateResult(`Could not check for updates${info.error ? `: ${info.error}` : '.'}`);
+      } else if (info.status === 'no_releases') {
+        setUpdateResult('No releases found — could not determine update status.');
+      } else if (!info.available) {
         setUpdateResult('You are running the latest version.');
       }
     } catch (err) {
@@ -441,6 +447,15 @@ export function SystemSettings(_props: SystemSettingsProps) {
             <p class="system-action-desc">
               Periodically check GitHub for new releases. You will still be prompted before installing.
             </p>
+            {autoUpdateConfig.last_check && (
+              <p class="system-action-desc" style={{ marginTop: 'var(--space-1)' }}>
+                {autoUpdateConfig.update_available
+                  ? `Update available: ${autoUpdateConfig.latest_version ?? 'new version'}`
+                  : 'Up to date'}
+                {' · last checked '}
+                {new Date(autoUpdateConfig.last_check).toLocaleString()}
+              </p>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, marginLeft: 'var(--space-4)' }}>
             <select
@@ -561,6 +576,7 @@ export function SystemSettings(_props: SystemSettingsProps) {
         onConfirm={handleReboot}
         title="Reboot TeslaPi"
         confirmLabel={rebooting ? 'Rebooting...' : 'Reboot Now'}
+        pending={rebooting}
         danger
       >
         <p>

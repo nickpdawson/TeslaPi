@@ -4,12 +4,18 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from backend import database
 from backend.config import settings
 from backend.services import dashcam_archive, script_runner
 
 logger = logging.getLogger(__name__)
 
-# Persistent state
+# Keys in the app_settings persistence store.
+_SETTING_ENABLED = "auto_sync_enabled"
+_SETTING_INTERVAL = "auto_sync_check_interval"
+
+# Runtime state. `enabled`/`check_interval` are the DEFAULTS until load_persisted()
+# overlays any saved values — so a user's choice survives a reboot (SOL-021).
 _state: dict = {
     "enabled": True,
     "check_interval": 300,  # seconds
@@ -19,6 +25,21 @@ _state: dict = {
     "last_action_at": None,
     "task": None,
 }
+
+
+async def load_persisted() -> None:
+    """Overlay saved enabled/interval from app_settings onto the in-memory state.
+    Called at start() so the loop honors the user's persisted choice instead of
+    resetting to the enabled-by-default state on every boot."""
+    enabled = await database.get_setting(_SETTING_ENABLED)
+    if enabled is not None:
+        _state["enabled"] = enabled == "true"
+    interval = await database.get_setting(_SETTING_INTERVAL)
+    if interval is not None:
+        try:
+            _state["check_interval"] = max(60, int(interval))
+        except ValueError:
+            logger.warning("Ignoring invalid persisted auto-sync interval: %r", interval)
 
 
 def get_status() -> dict:
@@ -33,8 +54,8 @@ def get_status() -> dict:
     }
 
 
-def configure(enabled: bool | None = None, check_interval: int | None = None) -> dict:
-    """Update auto-sync configuration.
+async def configure(enabled: bool | None = None, check_interval: int | None = None) -> dict:
+    """Update auto-sync configuration and persist it so it survives a reboot.
 
     Args:
         enabled: Enable or disable auto-sync.
@@ -45,10 +66,12 @@ def configure(enabled: bool | None = None, check_interval: int | None = None) ->
     """
     if enabled is not None:
         _state["enabled"] = enabled
+        await database.set_setting(_SETTING_ENABLED, "true" if enabled else "false")
         logger.info("Auto-sync %s", "enabled" if enabled else "disabled")
 
     if check_interval is not None:
         _state["check_interval"] = max(60, check_interval)
+        await database.set_setting(_SETTING_INTERVAL, str(_state["check_interval"]))
         logger.info("Auto-sync interval set to %ds", _state["check_interval"])
 
     return get_status()
@@ -64,6 +87,9 @@ async def start() -> None:
     if _state["running"]:
         logger.warning("Auto-sync loop already running")
         return
+
+    # Honor the persisted enabled/interval choice rather than the enabled-by-default.
+    await load_persisted()
 
     _state["running"] = True
     logger.info(

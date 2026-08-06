@@ -55,7 +55,12 @@ export interface MusicSyncStatus {
   };
 }
 
+export type SystemState = 'connected' | 'archiving' | 'syncing' | 'idle' | 'error' | 'offline';
+
 export interface TeslaPiStatus {
+  // The backend's overall assessment; the dashboard hero reflects this rather than
+  // re-deriving health from a single sub-status.
+  state: SystemState;
   system: SystemStatus;
   storage: StorageInfo[];
   gadget: GadgetStatus;
@@ -203,7 +208,7 @@ export interface MusicLibraryStats {
 
 export interface MusicSyncJob {
   id: number;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
   mode: string;
   paths_json: string;
   files_total: number;
@@ -290,6 +295,12 @@ export interface LocalMusicData {
   artists: LocalMusicArtist[];
   total_size: number;
   total_tracks: number;
+  // Real capacity of the music image (its FAT filesystem total), from the backend.
+  // Omitted/0 when the image couldn't be read (e.g. a sync owns it).
+  capacity_bytes?: number;
+  // Set by the backend when a sync owns the image and the on-Tesla tree can't be
+  // read; the UI shows a "syncing" state instead of a misleading empty library.
+  syncing?: boolean;
 }
 
 // --- Network / WiFi / WireGuard types ---
@@ -333,6 +344,9 @@ export interface WireGuardConfig {
   peerEndpoint: string;
   allowedIps: string;
   persistentKeepalive: number;
+  // True when the user just generated keys and wants the new one applied.
+  // Omitted/false on an edit, so the active tunnel key is preserved.
+  useGeneratedKey?: boolean;
 }
 
 export interface WireGuardStatus {
@@ -419,6 +433,11 @@ export interface SetupHardwareStatus {
 
 export interface UpdateInfo {
   available: boolean;
+  // Explicit outcome so "up to date" is only claimed when the check truly succeeded:
+  // 'update_available' | 'up_to_date' | 'no_releases' | 'error'. May be absent on
+  // older responses (treat as up_to_date/update_available per `available`).
+  status?: 'update_available' | 'up_to_date' | 'no_releases' | 'error';
+  error?: string | null;
   current_version: string;
   latest_version: string | null;
   changelog: string | null;
@@ -456,6 +475,8 @@ export interface AutoUpdateConfig {
   enabled: boolean;
   interval_hours: number;
   last_check: string | null;
+  update_available?: boolean;
+  latest_version?: string | null;
 }
 
 // --- Lock Chime / Customization types ---
@@ -468,7 +489,7 @@ export interface LockChimeStatus {
 
 export interface ArchiveJob {
   id: number;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled';
   trigger: string;
   clipsTotal: number;
   clipsCopied: number;

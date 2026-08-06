@@ -7,20 +7,31 @@ import type { TeslaPiStatus } from '../api/types';
 export const setupComplete = signal<boolean | null>(null);
 export const setupDetectedConfig = signal<Record<string, string> | null>(null);
 
-export async function checkSetupStatus(): Promise<void> {
-  try {
-    const result = await get<{
-      setupComplete: boolean;
-      hasExistingConfig: boolean;
-      detectedConfig: Record<string, string> | null;
-    }>('/setup/status');
-    setupComplete.value = result.setupComplete;
-    if (result.detectedConfig) {
-      setupDetectedConfig.value = result.detectedConfig;
+export async function checkSetupStatus(retries = 3): Promise<void> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await get<{
+        setupComplete: boolean;
+        hasExistingConfig: boolean;
+        detectedConfig: Record<string, string> | null;
+      }>('/setup/status');
+      setupComplete.value = result.setupComplete;
+      if (result.detectedConfig) {
+        setupDetectedConfig.value = result.detectedConfig;
+      }
+      return;
+    } catch {
+      if (attempt < retries) {
+        // Transient backend hiccup — back off and retry before deciding.
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
+      }
+      // Persistent failure: fail CLOSED. Never assume setup is complete — that would
+      // drop a fresh, unprovisioned Pi straight into the live dashboard with its
+      // destructive controls. Route to the wizard instead, which safely detects any
+      // existing config; a later successful check re-resolves the real state.
+      setupComplete.value = false;
     }
-  } catch {
-    // If the endpoint fails, assume setup is complete (don't block the app)
-    setupComplete.value = true;
   }
 }
 

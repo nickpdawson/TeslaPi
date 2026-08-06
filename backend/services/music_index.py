@@ -28,6 +28,21 @@ def get_indexing_status() -> dict:
     return dict(_indexing_state)
 
 
+def try_claim_indexing() -> bool:
+    """Synchronously reserve the indexing slot; returns False if already active.
+
+    Indexing and syncing must not overlap: they contend for the source share and
+    both write music_files.synced — a sync marking files synced=1 could otherwise
+    clobber a concurrent re-index's synced=0 reset (data loss: a changed file hidden
+    from "Sync New"). Callers claim this before starting index_library; start_sync
+    refuses while it's held. Being synchronous (no await), the claim is atomic.
+    """
+    if _indexing_state.get("active"):
+        return False
+    _indexing_state["active"] = True
+    return True
+
+
 async def index_library(mountpoint: str, db_path: str) -> dict:
     """Walk the mount and index artist/album/track into the database.
 
@@ -180,10 +195,12 @@ async def index_library(mountpoint: str, db_path: str) -> dict:
                         )
                         inserted += 1
                     elif existing[f["path"]] != f["modified_at"]:
+                        # The file changed on the share — reset synced so "Sync New"
+                        # (which selects synced=0) re-copies the updated version.
                         await db.execute(
                             """UPDATE music_files
                                SET artist=?, album=?, filename=?, size_bytes=?, modified_at=?,
-                                   indexed_at=CURRENT_TIMESTAMP
+                                   synced=0, indexed_at=CURRENT_TIMESTAMP
                                WHERE path=?""",
                             (f["artist"], f["album"], f["filename"],
                              f["size_bytes"], f["modified_at"], f["path"]),

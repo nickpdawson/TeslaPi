@@ -7,14 +7,14 @@ type="${3:-}"
 function send_signal () {
   log "Sending Signal message."
 
-  curl -X POST -H "Content-Type: application/json" "$SIGNAL_URL/v2/send" \
+  curl --fail --show-error -X POST -H "Content-Type: application/json" "$SIGNAL_URL/v2/send" \
      -d '{"message": "'"$message"'", "number": "'"$SIGNAL_FROM_NUM"'", "recipients": [ "'"$SIGNAL_TO_NUM"'" ]}'
  }
 
 function send_pushover () {
   log "Sending Pushover message."
 
-  curl -F "token=$PUSHOVER_APP_KEY" \
+  curl --fail --show-error -F "token=$PUSHOVER_APP_KEY" \
     -F "user=$PUSHOVER_USER_KEY" \
     -F "title=$title" \
     -F "message=$message" \
@@ -24,7 +24,7 @@ function send_pushover () {
 function send_gotify () {
   log "Sending Gotify message."
 
-  curl -X POST \
+  curl --fail --show-error -X POST \
     -F "title=$title" \
     -F "message=$message" \
     -F "priority=$GOTIFY_PRIORITY" \
@@ -34,7 +34,7 @@ function send_gotify () {
 function send_discord() {
   log "Sending Discord message."
 
-  curl -H "Content-Type: application/json" -d \
+  curl --fail --show-error -H "Content-Type: application/json" -d \
     '{"username": "'"$title"'", "content": "'"$message"'"}' \
     "$DISCORD_WEBHOOK_URL"
 }
@@ -42,7 +42,7 @@ function send_discord() {
 function send_ifttt () {
   log "Sending IFTTT message."
 
-  curl -X POST -H "Content-Type: application/json" -d \
+  curl --fail --show-error -X POST -H "Content-Type: application/json" -d \
     '{"value1":"'"$title"'","value2":"'"$message"'"}' \
     "https://maker.ifttt.com/trigger/$IFTTT_EVENT_NAME/with/key/$IFTTT_KEY"
 }
@@ -61,7 +61,7 @@ function send_matrix() {
 
 function send_telegram () {
   log "Sending Telegram message."
-  curl -v -H "Content-Type: application/json" -d \
+  curl --fail --show-error -v -H "Content-Type: application/json" -d \
     '{"chat_id": "'"$TELEGRAM_CHAT_ID"'", "text": "'"$title: $message"'", "disable_notification": '"$TELEGRAM_SILENT_NOTIFY"' }' \
     https://api.telegram.org/"$TELEGRAM_BOT_TOKEN"/sendMessage
 }
@@ -69,7 +69,7 @@ function send_telegram () {
 function send_webhook () {
   log "Sending Webhook message."
   
-  curl -X POST \
+  curl --fail --show-error -X POST \
     -d "{\"value1\":\"${title}\",\"value2\":\"${message}\"}" \
     -H "Content-Type: application/json" \
     "$WEBHOOK_URL"
@@ -78,7 +78,7 @@ function send_webhook () {
 function send_slack () {
   log "Sending Slack message."
   payload="{\"text\":\"$title: $message\",\"username\": \"Tesla\",\"icon_emoji\": \":tesla:\"}"
-  curl -X POST --data-urlencode "payload=$payload" "$SLACK_WEBHOOK_URL"
+  curl --fail --show-error -X POST --data-urlencode "payload=$payload" "$SLACK_WEBHOOK_URL"
 }
 
 function send_shell () {
@@ -94,7 +94,7 @@ function send_shell () {
 function send_ntfy () {
   log "Sending ntfy message."
 
-  curl -X POST \
+  curl --fail --show-error -X POST \
     -H "Title: $title" \
     -H "Priority: ${NTFY_PRIORITY:-3}" \
     ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
@@ -104,17 +104,28 @@ function send_ntfy () {
 
 log "$message"
 
-[ "${SIGNAL_ENABLED:-false}" = "true" ] && send_signal
-[ "${PUSHOVER_ENABLED:-false}" = "true" ] && send_pushover
-[ "${GOTIFY_ENABLED:-false}" = "true" ] && send_gotify
-[ "${DISCORD_ENABLED:-false}" = "true" ] && send_discord
-[ "${IFTTT_ENABLED:-false}" = "true" ] && send_ifttt
-[ "${SNS_ENABLED:-false}" = "true" ] && send_sns
-[ "${WEBHOOK_ENABLED:-false}" = "true" ] && send_webhook
-[ "${TELEGRAM_ENABLED:-false}" = "true" ] && send_telegram
-[ "${MATRIX_ENABLED:-false}" = "true" ] && send_matrix
-[ "${SLACK_ENABLED:-false}" = "true" ] && send_slack
-[ "${NOTIFICATION_COMMAND_ENABLED:-false}" = "true" ] && send_shell
-[ "${NTFY_ENABLED:-false}" = "true" ] && send_ntfy
+# Track whether any service was actually enabled and dispatched. Under `set -e`,
+# a send function that fails (e.g. curl network error) aborts the script with a
+# non-zero status BEFORE its `sent=1` runs — so a failed send is reported as a
+# failure. If no service is enabled at all, we exit non-zero too, so a "test" of
+# a channel that would send nothing isn't reported as success.
+sent=0
+if [ "${SIGNAL_ENABLED:-false}" = "true" ];               then send_signal;   sent=1; fi
+if [ "${PUSHOVER_ENABLED:-false}" = "true" ];             then send_pushover; sent=1; fi
+if [ "${GOTIFY_ENABLED:-false}" = "true" ];               then send_gotify;   sent=1; fi
+if [ "${DISCORD_ENABLED:-false}" = "true" ];              then send_discord;  sent=1; fi
+if [ "${IFTTT_ENABLED:-false}" = "true" ];                then send_ifttt;    sent=1; fi
+if [ "${SNS_ENABLED:-false}" = "true" ];                  then send_sns;      sent=1; fi
+if [ "${WEBHOOK_ENABLED:-false}" = "true" ];              then send_webhook;  sent=1; fi
+if [ "${TELEGRAM_ENABLED:-false}" = "true" ];             then send_telegram; sent=1; fi
+if [ "${MATRIX_ENABLED:-false}" = "true" ];               then send_matrix;   sent=1; fi
+if [ "${SLACK_ENABLED:-false}" = "true" ];                then send_slack;    sent=1; fi
+if [ "${NOTIFICATION_COMMAND_ENABLED:-false}" = "true" ]; then send_shell;    sent=1; fi
+if [ "${NTFY_ENABLED:-false}" = "true" ];                 then send_ntfy;     sent=1; fi
+
+if [ "$sent" -eq 0 ]; then
+  log "No notification service enabled — nothing sent"
+  exit 1
+fi
 
 exit 0

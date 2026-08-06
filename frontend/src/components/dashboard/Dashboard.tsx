@@ -15,6 +15,7 @@ interface DashboardProps {
 }
 
 const mockStatus: TeslaPiStatus = {
+  state: 'connected',
   system: {
     uptime: '4d 12h 33m',
     cpuTemp: 48.2,
@@ -95,15 +96,38 @@ function DashboardSkeleton() {
   );
 }
 
+function DashboardOffline({ error }: { error: string | null }) {
+  return (
+    <div class="container animate-fade-in">
+      <div class="card card--full" style={{ padding: 'var(--space-8)', textAlign: 'center' }}>
+        <div style={{ fontSize: 'var(--text-lg)', fontWeight: 600, marginBottom: 'var(--space-3)' }}>
+          Can't reach TeslaPi
+        </div>
+        <div class="text-muted" style={{ marginBottom: 'var(--space-4)' }}>
+          The dashboard couldn't load live status from the device.
+          {error ? ` (${error})` : ''}
+        </div>
+        <div class="text-sm text-muted">Retrying automatically…</div>
+      </div>
+    </div>
+  );
+}
+
 export function Dashboard(_props: DashboardProps) {
   const { loading, error } = useStatus();
 
-  // Use real status if available, fall back to mock
-  const data = statusSignal.value ?? mockStatus;
+  // Never fabricate data in production. Use real status if present; otherwise the
+  // demo mock ONLY in a dev build; otherwise null → a truthful offline state.
+  const data = statusSignal.value ?? (import.meta.env.DEV ? mockStatus : null);
 
   // Show skeleton only on true initial load (no data at all yet)
   if (loading && !statusSignal.value) {
     return <DashboardSkeleton />;
+  }
+
+  // Backend unreachable and no real data (production): show offline, not fake data.
+  if (!data) {
+    return <DashboardOffline error={error} />;
   }
 
   return (
@@ -118,7 +142,7 @@ export function Dashboard(_props: DashboardProps) {
           fontSize: 'var(--text-sm)',
           marginBottom: 'var(--space-6)',
         }}>
-          Using demo data. Backend not reachable: {error}
+          Using demo data (dev build). Backend not reachable: {error}
         </div>
       )}
 

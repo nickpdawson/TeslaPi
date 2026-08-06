@@ -128,6 +128,7 @@ class Updater:
         if settings.dev_mode:
             return {
                 "available": True,
+                "status": "update_available",
                 "current_version": current,
                 "latest_version": "1.1.0",
                 "changelog": (
@@ -148,16 +149,47 @@ class Updater:
                 resp = await client.get(url, headers={"Accept": "application/vnd.github+json"})
                 resp.raise_for_status()
                 data = resp.json()
+        except httpx.HTTPStatusError as exc:
+            # 404 on /releases/latest is ambiguous: either the repo has no releases
+            # yet, or it's misconfigured/inaccessible. So it's NEITHER a confident
+            # "up to date" (don't assert a positive check) NOR a transient error to
+            # retry-storm. Mark it distinctly ("no_releases") so the loop skips it to
+            # the next scheduled check without stamping last_check or backing off.
+            if exc.response is not None and exc.response.status_code == 404:
+                logger.info("GitHub: /releases/latest returned 404 (no releases or repo inaccessible)")
+                return {
+                    "available": False,
+                    "status": "no_releases",
+                    "current_version": current,
+                    "latest_version": None,
+                    "changelog": None,
+                    "download_url": None,
+                    "published_at": None,
+                    "size_bytes": None,
+                    "no_releases": True,
+                }
+            logger.error("GitHub release check failed: %s", exc)
+            return {
+                "available": False, "status": "error", "current_version": current,
+                "latest_version": None, "changelog": None, "download_url": None,
+                "published_at": None, "size_bytes": None, "error": str(exc),
+            }
         except Exception as exc:
+            # Network / timeout / JSON decode — a real, transient failure.
             logger.error("GitHub release check failed: %s", exc)
             return {
                 "available": False,
+                "status": "error",
                 "current_version": current,
                 "latest_version": None,
                 "changelog": None,
                 "download_url": None,
                 "published_at": None,
                 "size_bytes": None,
+                # Explicit failure marker: this dict looks like "up to date" but the
+                # check did NOT succeed. Callers (the auto-check loop) must not treat
+                # it as a successful check.
+                "error": str(exc),
             }
 
         latest_tag = data.get("tag_name", "0.0.0")
@@ -174,8 +206,10 @@ class Updater:
                 size_bytes = asset.get("size")
                 break
 
+        is_available = latest_parsed > current_parsed
         return {
-            "available": latest_parsed > current_parsed,
+            "available": is_available,
+            "status": "update_available" if is_available else "up_to_date",
             "current_version": current,
             "latest_version": latest_tag,
             "changelog": data.get("body"),
@@ -463,14 +497,14 @@ class Updater:
             except Exception:
                 pass
 
-    async def apply_uploaded_update(self, file_content: bytes, filename: str) -> dict:
-        """Apply an update from user-uploaded tarball bytes."""
-        os.makedirs(self.UPDATE_DIR, exist_ok=True)
-        dest = os.path.join(self.UPDATE_DIR, filename)
-        with open(dest, "wb") as fh:
-            fh.write(file_content)
+    async def apply_uploaded_update(self, tarball_path: str) -> dict:
+        """Apply an update from an already-saved uploaded tarball.
 
-        result = await self.apply_update(dest)
+        The router streams the upload to ``tarball_path`` (under UPDATE_DIR, with a
+        size cap and a basename-sanitized filename) — this method never sees the raw
+        client filename, so it can't be steered outside UPDATE_DIR.
+        """
+        result = await self.apply_update(tarball_path)
         # Override method in history
         history = await self.get_update_history()
         if history:
@@ -486,11 +520,22 @@ class Updater:
         """Check for update, download it, and apply it."""
         info = await self.check_for_updates()
         if not info["available"] or not info.get("download_url"):
+            # Report the check outcome honestly rather than a blanket "no update":
+            # an errored or no-releases check is NOT the same as "you're up to date".
+            status = info.get("status")
+            if status == "error":
+                message = f"Could not check for updates: {info.get('error', 'unknown error')}"
+            elif status == "no_releases":
+                message = "No releases found (repository may have no releases or be inaccessible)"
+            elif not info["available"]:
+                message = "No update available"
+            else:
+                message = "No download URL found"
             return {
                 "success": False,
                 "from_version": info["current_version"],
                 "to_version": info.get("latest_version", "unknown"),
-                "message": "No update available" if not info["available"] else "No download URL found",
+                "message": message,
                 "rolled_back": False,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -549,31 +594,119 @@ class Updater:
     # Auto-update config
     # ------------------------------------------------------------------
 
+    # Backoff between retries after a FAILED auto-check (short — don't wait the full
+    # interval when the last attempt errored).
+    AUTO_CHECK_RETRY_SECONDS = 900  # 15 minutes
+
+    def _auto_update_defaults(self) -> dict:
+        return {
+            "enabled": False,
+            "interval_hours": 24,
+            "last_check": None,       # time of last SUCCESSFUL check
+            "update_available": False,
+            "latest_version": None,
+        }
+
     async def get_auto_update_config(self) -> dict:
         if settings.dev_mode:
-            return {"enabled": False, "interval_hours": 24, "last_check": None}
+            return self._auto_update_defaults()
+        cfg = self._auto_update_defaults()
         try:
             path = Path(self.AUTO_UPDATE_FILE)
             if path.exists():
-                return json.loads(path.read_text())
+                cfg.update(json.loads(path.read_text()))
         except Exception as exc:
             logger.warning("Could not read auto-update config: %s", exc)
-        return {"enabled": False, "interval_hours": 24, "last_check": None}
+        return cfg
+
+    def _write_auto_update_config(self, cfg: dict) -> None:
+        if settings.dev_mode:
+            return
+        try:
+            path = Path(self.AUTO_UPDATE_FILE)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cfg, indent=2))
+        except Exception as exc:
+            logger.warning("Could not write auto-update config: %s", exc)
 
     async def set_auto_update_config(self, enabled: bool, interval_hours: int) -> dict:
-        config = {
-            "enabled": enabled,
-            "interval_hours": interval_hours,
-            "last_check": None,
-        }
-        if not settings.dev_mode:
-            try:
-                path = Path(self.AUTO_UPDATE_FILE)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(config, indent=2))
-            except Exception as exc:
-                logger.warning("Could not write auto-update config: %s", exc)
-        return config
+        # Merge over existing so last_check / update_available / latest_version survive
+        # a toggle change (previously a save reset them).
+        cfg = await self.get_auto_update_config()
+        cfg["enabled"] = enabled
+        cfg["interval_hours"] = interval_hours
+        self._write_auto_update_config(cfg)
+        return cfg
+
+    async def _record_auto_check_result(self, info: dict) -> None:
+        """Persist a SUCCESSFUL auto-check so the UI (via GET /updates/auto-check)
+        can surface it: last_check time plus whether an update is available."""
+        cfg = await self.get_auto_update_config()
+        cfg["last_check"] = datetime.now(timezone.utc).isoformat()
+        cfg["update_available"] = bool(info.get("available"))
+        cfg["latest_version"] = info.get("latest_version")
+        self._write_auto_update_config(cfg)
+
+    async def run_auto_check_loop(self) -> None:
+        """Background loop that periodically checks for updates per the persisted
+        config. CHECKS ONLY — never auto-applies (unattended root updates are unsafe;
+        applying stays a manual, explicit action). Persists the result (surfaced by
+        GET /updates/auto-check) and logs when an update is available. On a failed
+        check it retries after a short backoff rather than waiting the full interval.
+        Started once from the app lifespan.
+        """
+        logger.info("Auto-update-check loop started")
+        try:
+            while True:
+                cfg = await self.get_auto_update_config()
+                try:
+                    interval_hours = max(1, int(cfg.get("interval_hours", 24)))
+                except (TypeError, ValueError):
+                    interval_hours = 24
+                interval_seconds = interval_hours * 3600
+
+                if not (cfg.get("enabled") and not settings.dev_mode):
+                    # Disabled — re-read the config hourly so a re-enable is picked up.
+                    await asyncio.sleep(min(3600, interval_seconds))
+                    continue
+
+                backoff = min(self.AUTO_CHECK_RETRY_SECONDS, interval_seconds)
+                try:
+                    info = await self.check_for_updates()
+                except Exception as exc:
+                    # Retry-correct: a transient failure backs off briefly instead of
+                    # blocking the next attempt for the full interval.
+                    logger.warning("Auto-check failed: %s; retrying in %ds", exc, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # check_for_updates swallows GitHub errors and returns a dict with an
+                # "error" marker (looks like "up to date" but isn't a real result) —
+                # treat that as a failed check, NOT a successful one.
+                if info.get("error"):
+                    logger.warning("Auto-check: GitHub check failed: %s; retrying in %ds",
+                                   info["error"], backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # 404/no-releases is indeterminate — don't record it as a successful
+                # "up to date" check, but don't retry-storm either. Wait for the next
+                # scheduled interval.
+                if info.get("no_releases"):
+                    logger.info("Auto-check: no releases to compare against; next check in %dh", interval_hours)
+                    await asyncio.sleep(interval_seconds)
+                    continue
+
+                await self._record_auto_check_result(info)
+                if info.get("available"):
+                    logger.info(
+                        "Auto-check: update %s available (current %s)",
+                        info.get("latest_version"), info.get("current_version"),
+                    )
+                await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info("Auto-update-check loop cancelled")
+            raise
 
     # ------------------------------------------------------------------
     # Private helpers

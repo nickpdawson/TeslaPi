@@ -181,6 +181,7 @@ export function WiFiConnections({ connections, onRemove, onUpdatePriority, onCon
         onConfirm={handleDelete}
         title="Remove WiFi Network"
         confirmLabel={working ? 'Removing...' : 'Remove'}
+        pending={working}
         danger
       >
         <p>

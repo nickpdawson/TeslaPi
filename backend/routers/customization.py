@@ -80,14 +80,23 @@ async def upload_lock_chime(file: UploadFile) -> dict:
 
     Requires temporarily disabling the USB gadget.
     """
-    # 1. Read file into memory (with size limit)
-    contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large ({len(contents)} bytes). Maximum is {MAX_FILE_SIZE} bytes (10 MB).",
-        )
-    if len(contents) == 0:
+    # 1. Read file into memory in chunks, rejecting oversize BEFORE buffering the
+    #    whole thing (a plain await file.read() buffers any size — OOM on a 2 GB post).
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum is {MAX_FILE_SIZE} bytes (10 MB).",
+            )
+        chunks.append(chunk)
+    contents = b"".join(chunks)
+    if total == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     # 2. Validate WAV header

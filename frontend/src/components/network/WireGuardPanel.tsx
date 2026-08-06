@@ -12,7 +12,7 @@ interface WireGuardPanelProps {
   onToggle: (enable: boolean) => Promise<void>;
   onSetAuto: (enabled: boolean, onlyNonHome: boolean, homeSsid: string | null) => Promise<void>;
   onGenerateKeys: () => Promise<{ publicKey: string }>;
-  onTestTunnel: () => Promise<{ success: boolean; latencyMs: number | null; error: string | null }>;
+  onTestTunnel: () => Promise<{ success: boolean; message: string }>;
 }
 
 function ShieldIcon() {
@@ -98,6 +98,9 @@ function WireGuardSetup({ onGenerateKeys, onSaveConfig }: {
         peerEndpoint,
         allowedIps,
         persistentKeepalive: keepalive,
+        // Keys generated in this flow → apply the freshly generated stored key.
+        // Otherwise this is an edit and the server keeps the active tunnel key.
+        useGeneratedKey: Boolean(publicKey),
       });
       addNotification('success', 'WireGuard configuration saved');
     } catch (err) {
@@ -275,12 +278,12 @@ function WireGuardConfigured({ wgStatus, connections, onToggle, onSetAuto, onTes
   connections: WiFiConnection[];
   onToggle: (enable: boolean) => Promise<void>;
   onSetAuto: (enabled: boolean, onlyNonHome: boolean, homeSsid: string | null) => Promise<void>;
-  onTestTunnel: () => Promise<{ success: boolean; latencyMs: number | null; error: string | null }>;
+  onTestTunnel: () => Promise<{ success: boolean; message: string }>;
   onEditConfig: () => void;
 }) {
   const [toggling, setToggling] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; latencyMs: number | null; error: string | null } | null>(null);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   async function handleToggle(enable: boolean) {
     setToggling(true);
@@ -300,13 +303,9 @@ function WireGuardConfigured({ wgStatus, connections, onToggle, onSetAuto, onTes
     try {
       const result = await onTestTunnel();
       setTestResult(result);
-      if (result.success) {
-        addNotification('success', `Tunnel working. Latency: ${result.latencyMs}ms`);
-      } else {
-        addNotification('error', result.error ?? 'Tunnel test failed');
-      }
+      addNotification(result.success ? 'success' : 'error', result.message);
     } catch (err) {
-      setTestResult({ success: false, latencyMs: null, error: err instanceof Error ? err.message : 'Test failed' });
+      setTestResult({ success: false, message: err instanceof Error ? err.message : 'Test failed' });
     } finally {
       setTesting(false);
     }
@@ -440,10 +439,7 @@ function WireGuardConfigured({ wgStatus, connections, onToggle, onSetAuto, onTes
       {testResult && (
         <div class={`test-result tunnel-test ${testResult.success ? 'test-result--success' : 'test-result--error'}`}>
           <span class="test-result__icon">{testResult.success ? 'OK' : '!!'}</span>
-          {testResult.success
-            ? `Tunnel working. Latency: ${testResult.latencyMs}ms`
-            : testResult.error ?? 'Tunnel test failed'
-          }
+          {testResult.message}
         </div>
       )}
     </div>

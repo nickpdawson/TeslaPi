@@ -146,8 +146,9 @@ function AlbumRow({ album }: { album: LocalMusicAlbum }) {
   );
 }
 
-// Assume 1.7 TB music image capacity (default TeslaUSB music partition)
-const MUSIC_IMAGE_CAPACITY = 1.7 * 1024 * 1024 * 1024 * 1024;
+// Last-resort capacity only if the backend didn't report the real image size
+// (older backend / image unreadable). The real value comes from localMusic.capacity_bytes.
+const MUSIC_IMAGE_CAPACITY_FALLBACK = 1.7 * 1024 * 1024 * 1024 * 1024;
 
 export function OnTeslaTab({
   localMusic,
@@ -177,7 +178,11 @@ export function OnTeslaTab({
   };
 
   const usedBytes = localMusic?.total_size ?? 0;
-  const usedRatio = MUSIC_IMAGE_CAPACITY > 0 ? usedBytes / MUSIC_IMAGE_CAPACITY : 0;
+  // Prefer the real image capacity from the backend; fall back only if it's absent.
+  const capacity = localMusic?.capacity_bytes && localMusic.capacity_bytes > 0
+    ? localMusic.capacity_bytes
+    : MUSIC_IMAGE_CAPACITY_FALLBACK;
+  const usedRatio = capacity > 0 ? usedBytes / capacity : 0;
 
   return (
     <div class="on-tesla">
@@ -187,7 +192,7 @@ export function OnTeslaTab({
           <span class="text-sm">
             <strong class="font-mono">{formatBytes(usedBytes)}</strong>
             <span class="text-muted"> used of </span>
-            <strong class="font-mono">{formatBytes(MUSIC_IMAGE_CAPACITY)}</strong>
+            <strong class="font-mono">{formatBytes(capacity)}</strong>
           </span>
         </div>
         <ProgressBar value={usedRatio} size="sm" color="auto" />
@@ -227,7 +232,19 @@ export function OnTeslaTab({
           </div>
         )}
 
-        {!localMusicLoading && localMusic && localMusic.artists.length === 0 && (
+        {!localMusicLoading && localMusic && localMusic.syncing && (
+          <div class="on-tesla__empty">
+            <MusicNoteIcon />
+            <p class="text-sm text-muted" style={{ marginTop: 'var(--space-3)' }}>
+              Sync in progress&hellip;
+            </p>
+            <p class="text-xs text-muted" style={{ marginTop: 'var(--space-1)' }}>
+              The on-Tesla library can't be read while music is syncing. It'll appear here when the sync finishes.
+            </p>
+          </div>
+        )}
+
+        {!localMusicLoading && localMusic && !localMusic.syncing && localMusic.artists.length === 0 && (
           <div class="on-tesla__empty">
             <MusicNoteIcon />
             <p class="text-sm text-muted" style={{ marginTop: 'var(--space-3)' }}>
@@ -287,6 +304,7 @@ export function OnTeslaTab({
         onConfirm={handleDelete}
         title="Delete Artist"
         confirmLabel={deleting ? 'Deleting...' : 'Delete'}
+        pending={deleting}
         danger
       >
         <p class="text-sm">

@@ -159,13 +159,12 @@ export function LockChimeSettings() {
       {/* Current status */}
       <div style={{
         padding: 'var(--space-3) var(--space-4)',
-        background: 'var(--color-surface-raised)',
+        background: 'var(--color-bg-raised)',
         borderRadius: 'var(--radius-md)',
         marginBottom: 'var(--space-4)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: 'var(--space-3)',
         minHeight: '44px',
       }}>
         {loading ? (
@@ -178,6 +177,7 @@ export function LockChimeSettings() {
             </span>
             <button
               class={`btn btn--sm ${confirmRemove ? 'btn--danger' : 'btn--ghost'}`}
+              style={{ marginLeft: 'var(--space-3)', flexShrink: 0 }}
               onClick={handleRemove}
               disabled={removing || uploading}
             >
@@ -202,12 +202,12 @@ export function LockChimeSettings() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         style={{
-          border: `2px dashed ${dragOver ? 'var(--color-primary)' : 'var(--color-border)'}`,
+          border: `2px dashed ${dragOver ? 'var(--color-accent)' : 'var(--color-border)'}`,
           borderRadius: 'var(--radius-md)',
           padding: 'var(--space-6)',
           textAlign: 'center',
           transition: 'border-color 0.15s, background 0.15s',
-          background: dragOver ? 'var(--color-primary-glow)' : 'transparent',
+          background: dragOver ? 'var(--color-accent-glow)' : 'transparent',
           cursor: uploading ? 'wait' : 'pointer',
           position: 'relative',
         }}
@@ -241,7 +241,7 @@ export function LockChimeSettings() {
               <div style={{
                 width: `${uploadProgress}%`,
                 height: '100%',
-                background: 'var(--color-primary)',
+                background: 'var(--color-accent)',
                 transition: 'width 0.2s',
               }} />
             </div>

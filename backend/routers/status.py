@@ -1,6 +1,5 @@
 """Status endpoint returning full TeslaPi system state."""
 
-import json
 import logging
 from datetime import datetime, timezone
 
@@ -35,6 +34,7 @@ def _mock_status() -> TeslaPiStatus:
             teslausb_version="2024.44.25",
             uptime_seconds=345600,
             cpu_temp_celsius=38.2,
+            cpu_usage=12.5,
             ram_used_bytes=432_013_312,
             ram_total_bytes=4_147_483_648,
             wifi_ssid="HomeWiFi",
@@ -112,6 +112,42 @@ def _mock_status() -> TeslaPiStatus:
     )
 
 
+# Previous /proc/stat sample (total, idle jiffies) for computing CPU usage as a
+# delta across status polls — avoids blocking the request with a sleep.
+_prev_cpu_sample: tuple[int, int] | None = None
+
+
+async def _read_cpu_usage() -> float:
+    """CPU usage percent, computed from the delta between successive /proc/stat
+    reads. Returns 0.0 on the first call (no baseline) or if /proc/stat is
+    unreadable — never raises."""
+    global _prev_cpu_sample
+    result = await script_runner.run("cat", ["/proc/stat"], timeout=5)
+    if result.returncode != 0 or not result.stdout:
+        return 0.0
+    line = result.stdout.splitlines()[0]
+    parts = line.split()
+    if len(parts) < 5 or parts[0] != "cpu":
+        return 0.0
+    try:
+        nums = [int(x) for x in parts[1:]]
+    except ValueError:
+        return 0.0
+    total = sum(nums)
+    idle = nums[3] + (nums[4] if len(nums) > 4 else 0)  # idle + iowait
+
+    prev = _prev_cpu_sample
+    _prev_cpu_sample = (total, idle)
+    if prev is None:
+        return 0.0
+    total_delta = total - prev[0]
+    idle_delta = idle - prev[1]
+    if total_delta <= 0:
+        return 0.0
+    usage = 100.0 * (total_delta - idle_delta) / total_delta
+    return round(max(0.0, min(100.0, usage)), 1)
+
+
 async def _read_system_info() -> SystemStatus:
     """Gather system info from /proc and standard tools."""
     info = SystemStatus()
@@ -119,7 +155,7 @@ async def _read_system_info() -> SystemStatus:
     # Hostname
     result = await script_runner.run("hostname", timeout=5)
     if result.returncode == 0:
-        info.hostname = result.stdout
+        info.hostname = result.stdout.strip()
 
     # OS version
     result = await script_runner.run("cat", ["/etc/os-release"], timeout=5)
@@ -157,10 +193,13 @@ async def _read_system_info() -> SystemStatus:
                 avail = int(line.split()[1]) * 1024
                 info.ram_used_bytes = info.ram_total_bytes - avail
 
+    # CPU usage (delta across polls)
+    info.cpu_usage = await _read_cpu_usage()
+
     # WiFi
     result = await script_runner.run("iwgetid", ["-r"], timeout=5)
     if result.returncode == 0:
-        info.wifi_ssid = result.stdout
+        info.wifi_ssid = result.stdout.strip()
 
     result = await script_runner.run(
         "bash", ["-c", "iwconfig wlan0 2>/dev/null | grep -o 'Signal level=.*' | grep -o '[-0-9]*'"],
@@ -177,7 +216,7 @@ async def _read_system_info() -> SystemStatus:
         "bash", ["-c", "hostname -I | awk '{print $1}'"], timeout=5
     )
     if result.returncode == 0:
-        info.ip_address = result.stdout
+        info.ip_address = result.stdout.strip()
 
     return info
 
@@ -379,13 +418,27 @@ async def _read_dashcam_events() -> list[DashcamEvent]:
 def _determine_system_state(
     archive_data: dict,
     music: MusicSyncStatus,
+    gadget: GadgetStatus,
 ) -> SystemState:
-    """Determine the overall system state from sub-statuses."""
+    """Determine the overall system state from sub-statuses.
+
+    Priority: an active operation (archiving/syncing) is reported first because it's
+    what's happening right now; then a recent failure (ERROR); then CONNECTED when the
+    USB gadget is presented to the car but idle; else IDLE. OFFLINE is intentionally
+    NOT emitted here — if this endpoint is responding the Pi is online; the dashboard
+    owns OFFLINE for when the API itself is unreachable.
+    """
     latest_job = archive_data.get("latest_job")
-    if latest_job and latest_job.get("status") == "running":
+    job_status = latest_job.get("status") if latest_job else None
+
+    if job_status == "running":
         return SystemState.ARCHIVING
     if music.sync_in_progress:
         return SystemState.SYNCING
+    if job_status == "failed":
+        return SystemState.ERROR
+    if gadget.enabled:
+        return SystemState.CONNECTED
     return SystemState.IDLE
 
 
@@ -394,21 +447,14 @@ async def get_status() -> TeslaPiStatus:
     """Return full system status.
 
     In dev mode, returns mock data. In production, gathers real data
-    from scripts, sysfs, and proc.
+    from sysfs and proc.
     """
     if settings.dev_mode:
         return _mock_status()
 
-    # Try the status.sh script first for a unified JSON response
-    result = await script_runner.run("bash", ["run/status.sh"], timeout=15)
-    if result.returncode == 0:
-        try:
-            data = json.loads(result.stdout)
-            return TeslaPiStatus(**data)
-        except (json.JSONDecodeError, Exception) as exc:
-            logger.warning("Failed to parse status.sh output: %s", exc)
-
-    # Fall back to gathering individual pieces
+    # Gather status from sysfs/proc/DB. (There is no run/status.sh — an earlier
+    # "try the script first" probe spawned bash on every request only to fail and
+    # fall through here, so it was removed.)
     system = await _read_system_info()
     storage = await _read_storage()
     gadget = await _read_gadget_status()
@@ -433,7 +479,7 @@ async def get_status() -> TeslaPiStatus:
     dashcam_events = await _read_dashcam_events()
 
     # Determine overall state
-    state = _determine_system_state(archive_data, music)
+    state = _determine_system_state(archive_data, music, gadget)
 
     return TeslaPiStatus(
         state=state,

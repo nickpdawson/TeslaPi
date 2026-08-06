@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -42,14 +43,21 @@ async def run(
     args: list[str] | None = None,
     timeout: int = 30,
     cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    input_data: str | None = None,
 ) -> ScriptResult:
     """Execute a bash script asynchronously.
 
     Args:
         script: Path to the script or command to run.
-        args: Command-line arguments.
+        args: Command-line arguments (passed as argv — never shell-interpreted).
         timeout: Maximum execution time in seconds.
         cwd: Working directory for the script.
+        env: Extra environment variables, merged over the current environment. Use
+            this instead of building a ``VAR=val ... cmd`` shell string.
+        input_data: Text written to the process's stdin (then closed). Use this to
+            feed file content to e.g. ``sudo tee`` instead of ``echo '...' |``, so
+            the content never passes through a shell.
 
     Returns:
         ScriptResult with output, exit code, and timing.
@@ -62,16 +70,23 @@ async def run(
     cmd_str = " ".join(cmd)
     logger.debug("Running: %s (timeout=%ds, cwd=%s)", cmd_str, timeout, cwd)
 
+    full_env = {**os.environ, **env} if env else None
+
     start = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if input_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=full_env,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
+            proc.communicate(
+                input_data.encode("utf-8") if input_data is not None else None
+            ),
+            timeout=timeout,
         )
         duration = time.monotonic() - start
 

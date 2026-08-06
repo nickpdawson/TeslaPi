@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'preact/hooks';
 import type { FileEntry } from '../../api/types';
-import { useFiles } from '../../hooks/useFiles';
+import { useFiles, shouldApplyListing } from '../../hooks/useFiles';
 import type { Drive } from '../../hooks/useFiles';
 import { FileTree } from './FileTree';
 import { FileList } from './FileList';
@@ -34,13 +34,34 @@ export function FileBrowser(_props: FileBrowserProps) {
   const [newFolderMode, setNewFolderMode] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const dragCounter = useRef(0);
+  // Abort functions for in-flight uploads, keyed by upload id, so Cancel can stop
+  // the actual XHR transfer (not just flip UI state).
+  const uploadAborts = useRef<Map<string, () => void>>(new Map());
+  // Monotonic token so a late listing response can't overwrite a newer one. Without
+  // it, switching drives while a request is in flight lets the old drive's files
+  // render under the new drive — and a delete would then target the wrong drive.
+  const requestSeq = useRef(0);
+  // The live current drive. A mutation handler (delete/rename/mkdir/upload) captures
+  // the drive from its render and calls navigate() AFTER the mutation resolves — if
+  // the user switched drives meanwhile, that stale navigate would issue a fresh (so
+  // seq-newest) request for the OLD drive and win. The seq only orders requests; this
+  // ref lets a response verify it's still for the drive on screen.
+  const driveRef = useRef(drive);
+  useEffect(() => {
+    driveRef.current = drive;
+  }, [drive]);
 
   const { loading, listFiles, uploadFile, createFolder, deleteItems, moveItem, getDownloadUrl } = useFiles();
 
   // Fetch directory listing
   const navigate = useCallback(async (path: string) => {
     setSelectedPaths(new Set());
+    const seq = ++requestSeq.current;
+    const reqDrive = drive;
     const data = await listFiles(drive, path);
+    // Drop a stale response (see shouldApplyListing): a newer navigate superseded
+    // this one, or the drive on screen changed since the request was issued.
+    if (!shouldApplyListing(seq, requestSeq.current, reqDrive, driveRef.current)) return;
     if (data) {
       setCurrentPath(data.path);
       setEntries(data.entries);
@@ -148,16 +169,35 @@ export function FileBrowser(_props: FileBrowserProps) {
 
     for (const u of newUploads) {
       setUploads((prev) => prev.map((p) => (p.id === u.id ? { ...p, status: 'uploading' } : p)));
-      uploadFile(drive, currentPath, u.file, (pct) => {
-        setUploads((prev) => prev.map((p) => (p.id === u.id ? { ...p, progress: pct } : p)));
-      }).then((ok) => {
+      uploadFile(
+        drive,
+        currentPath,
+        u.file,
+        (pct) => {
+          setUploads((prev) => prev.map((p) => (p.id === u.id ? { ...p, progress: pct } : p)));
+        },
+        (abort) => uploadAborts.current.set(u.id, abort),
+      ).then((ok) => {
+        uploadAborts.current.delete(u.id);
         setUploads((prev) =>
-          prev.map((p) => (p.id === u.id ? { ...p, status: ok ? 'done' : 'error', progress: ok ? 100 : p.progress } : p))
+          prev.map((p) => {
+            if (p.id !== u.id) return p;
+            // A user-cancelled upload keeps its 'error'+cancelled state; don't flip it to 'done'.
+            if (p.cancelled) return { ...p, status: 'error' };
+            return { ...p, status: ok ? 'done' : 'error', progress: ok ? 100 : p.progress };
+          })
         );
-        // Refresh listing after each upload completes
-        navigate(currentPath);
+        // Refresh the listing after a successful upload (a cancel left nothing new).
+        if (ok) navigate(currentPath);
       });
     }
+  }
+
+  function cancelUpload(id: string) {
+    // Actually abort the transfer, then mark it cancelled.
+    uploadAborts.current.get(id)?.();
+    uploadAborts.current.delete(id);
+    setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, cancelled: true, status: 'error' } : u)));
   }
 
   // Drag & drop handlers
@@ -365,7 +405,7 @@ export function FileBrowser(_props: FileBrowserProps) {
         visible={uploads.length > 0}
         uploads={uploads}
         onDismiss={() => setUploads([])}
-        onCancel={(id) => setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, cancelled: true, status: 'error' } : u)))}
+        onCancel={cancelUpload}
       />
 
       {/* Audio player */}

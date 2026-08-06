@@ -16,10 +16,12 @@ function getTypeStyles(type: Notification['type']): { bg: string; border: string
 
 function ToastItem({ notification }: { notification: Notification }) {
   const styles = getTypeStyles(notification.type);
+  // Errors/warnings interrupt (assertive); success/info wait for a pause (polite).
+  const assertive = notification.type === 'error' || notification.type === 'warning';
 
   return (
     <div
-      onClick={() => removeNotification(notification.id)}
+      role={assertive ? 'alert' : 'status'}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -29,14 +31,13 @@ function ToastItem({ notification }: { notification: Notification }) {
         borderLeft: `4px solid ${styles.border}`,
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-lg)',
-        cursor: 'pointer',
         animation: 'slide-in-right 0.3s ease forwards',
         minWidth: '280px',
         maxWidth: '400px',
         transition: 'opacity var(--transition-base)',
       }}
     >
-      <span style={{
+      <span aria-hidden="true" style={{
         width: '24px',
         height: '24px',
         borderRadius: '50%',
@@ -59,6 +60,23 @@ function ToastItem({ notification }: { notification: Notification }) {
       }}>
         {notification.message}
       </span>
+      <button
+        onClick={() => removeNotification(notification.id)}
+        aria-label="Dismiss notification"
+        style={{
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--color-text-muted)',
+          cursor: 'pointer',
+          fontSize: '20px',
+          lineHeight: 1,
+          marginLeft: 'var(--space-3)',
+          padding: 'var(--space-1)',
+          flexShrink: 0,
+        }}
+      >
+        &times;
+      </button>
     </div>
   );
 }
@@ -68,7 +86,7 @@ export function ToastContainer() {
   if (items.length === 0) return null;
 
   return (
-    <div class="toast-container">
+    <div class="toast-container" role="region" aria-label="Notifications">
       {items.map(n => (
         <ToastItem key={n.id} notification={n} />
       ))}

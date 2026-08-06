@@ -43,6 +43,7 @@ def _get_archive_share_config() -> dict | None:
 
     server = cfg.get("archive_share_server") or cfg.get("ARCHIVE_SERVER", "")
     share_name = cfg.get("archive_share_path") or cfg.get("SHARE_NAME", "")
+    share_type = cfg.get("archive_share_type") or cfg.get("SHARE_TYPE", "cifs")
     username = cfg.get("archive_share_username") or cfg.get("SHARE_USER", "")
     password = cfg.get("archive_share_password") or cfg.get("SHARE_PASSWORD", "")
     domain = cfg.get("archive_share_domain") or cfg.get("SHARE_DOMAIN", "")
@@ -53,6 +54,7 @@ def _get_archive_share_config() -> dict | None:
     return {
         "server": server,
         "share_name": share_name,
+        "share_type": (share_type or "cifs").lower(),
         "username": username,
         "password": password,
         "domain": domain,
@@ -75,24 +77,68 @@ async def start_archive(
     if _active_archive["job_id"] is not None:
         raise RuntimeError("An archive is already in progress")
 
-    db_path = str(settings.database_path)
-    async with aiosqlite.connect(db_path) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
+    # NOTE: the inherited teslausb archiveloop daemon (enabled by default — see
+    # teslapi_plan.md "the archive loop is preserved") is the canonical dashcam
+    # archiver and also touches the cam image + USB gadget. This web-triggered
+    # archiver coexists with it; the *_we_mounted tracking below avoids tearing down
+    # the daemon's mounts, but full coordination (or deciding which archiver owns
+    # dashcam) is an unresolved Phase 2/3 architectural decision — see work log.
 
-        cursor = await db.execute(
-            """INSERT INTO dashcam_archive_jobs (status, trigger, started_at)
-               VALUES (?, ?, ?)""",
-            ("pending", trigger, datetime.now(timezone.utc).isoformat()),
-        )
-        job_id = cursor.lastrowid
-        await db.commit()
+    # Claim the slot synchronously BEFORE the first await so two concurrent callers
+    # can't both pass the guard above and start two archives into one image.
+    _active_archive["job_id"] = -1  # sentinel: claimed, real id assigned below
+    _active_archive["cancelled"] = False
+    _active_archive["process"] = None
+
+    db_path = str(settings.database_path)
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL")
+
+            cursor = await db.execute(
+                """INSERT INTO dashcam_archive_jobs (status, trigger, started_at)
+                   VALUES (?, ?, ?)""",
+                ("pending", trigger, datetime.now(timezone.utc).isoformat()),
+            )
+            job_id = cursor.lastrowid
+            await db.commit()
+    except Exception:
+        _active_archive["job_id"] = None  # release the claim on failure
+        raise
 
     _active_archive["job_id"] = job_id
-    _active_archive["cancelled"] = False
 
     asyncio.create_task(_run_archive(job_id, delete_after))
     return job_id
+
+
+async def _archive_one_clip(src: str, dest_dir: str, timeout: float = 300.0) -> tuple[int, str]:
+    """rsync a single clip, tracked as ``_active_archive['process']`` so cancel can
+    kill it mid-transfer. Returns ``(returncode, stderr)``. rc 124 = timed out."""
+    # -rt (recursive + mtimes), NOT -a: archiving to a network share (esp. NFS with
+    # root_squash) rejects the chown/chmod that -a's -o/-g/-p attempt, making rsync
+    # return code 23 for every clip even though the data copied fine. Clips are plain
+    # files that need only content + mtime preserved.
+    proc = await asyncio.create_subprocess_exec(
+        "rsync", "-rt", "--partial", "--timeout=60", src, dest_dir + "/",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _active_archive["process"] = proc
+    try:
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            return 124, "rsync timed out"
+        return proc.returncode, (stderr.decode("utf-8", errors="replace") if stderr else "")
+    finally:
+        _active_archive["process"] = None
 
 
 async def _run_archive(job_id: int, delete_after: bool) -> None:
@@ -105,13 +151,33 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
             await _run_archive_dev(job_id, db_path)
             return
 
-        # Step 1: Mount cam image read-only (safe while Tesla writes through gadget)
-        logger.info("Archive job %d: mounting cam image read-only", job_id)
-        result = await script_runner.run(
-            "mount", ["-o", "ro,loop", CAM_IMAGE, CAM_MOUNT], timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to mount cam image: {result.stderr}")
+        if delete_after:
+            # The cam image is mounted read-only (so recording continues safely), so
+            # host-side deletion cannot and MUST not happen here — writing the image
+            # while the car owns it corrupts the filesystem. Free-space management on
+            # the cam is a separate mechanism; skip deletion and say so.
+            logger.warning(
+                "Archive job %d: delete_after requested but unsupported with the "
+                "read-only cam snapshot; clips will be archived but NOT deleted.",
+                job_id,
+            )
+
+        # Step 1: Mount cam image read-only. Read-only means the host never writes the
+        # image, so it is safe to snapshot while the Tesla records through the gadget.
+        # Skip if already mounted — that mount may belong to the inherited teslausb
+        # archiveloop daemon, and we must NOT unmount someone else's mount (Step 7).
+        cam_we_mounted = False
+        cam_check = await script_runner.run("mountpoint", ["-q", CAM_MOUNT], timeout=5)
+        if cam_check.returncode == 0:
+            logger.info("Archive job %d: cam image already mounted (reusing, will not unmount)", job_id)
+        else:
+            logger.info("Archive job %d: mounting cam image read-only", job_id)
+            result = await script_runner.run(
+                "mount", ["-o", "ro,loop", CAM_IMAGE, CAM_MOUNT], timeout=15,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to mount cam image: {result.stderr}")
+            cam_we_mounted = True
 
         try:
             # Step 2: Discover unarchived clips
@@ -128,25 +194,31 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                               clips_total=len(unarchived),
                               bytes_total=total_bytes)
 
-            # Step 3: Mount archive CIFS share with RW access
-            share_cfg = _get_archive_share_config()
-            if not share_cfg:
-                raise RuntimeError("Archive share not configured")
+            # Step 3: Mount archive share RW — skip if already mounted (that mount may
+            # belong to the teslausb archiveloop daemon; we must not unmount it later).
+            archive_we_mounted = False
+            if await share_browser.is_mounted(ARCHIVE_MOUNT):
+                logger.info("Archive job %d: archive share already mounted (reusing, will not unmount)", job_id)
+            else:
+                share_cfg = _get_archive_share_config()
+                if not share_cfg:
+                    raise RuntimeError("Archive share not configured")
 
-            logger.info("Archive job %d: mounting archive share on %s",
-                        job_id, share_cfg["server"])
-            mounted = await share_browser.mount_share(
-                share_type="cifs",
-                server=share_cfg["server"],
-                path=share_cfg["share_name"],
-                mountpoint=ARCHIVE_MOUNT,
-                username=share_cfg["username"],
-                password=share_cfg["password"],
-                domain=share_cfg["domain"],
-                read_only=False,
-            )
-            if not mounted:
-                raise RuntimeError("Failed to mount archive share")
+                logger.info("Archive job %d: mounting archive share (%s) on %s",
+                            job_id, share_cfg["share_type"], share_cfg["server"])
+                mounted = await share_browser.mount_share(
+                    share_type=share_cfg["share_type"],
+                    server=share_cfg["server"],
+                    path=share_cfg["share_name"],
+                    mountpoint=ARCHIVE_MOUNT,
+                    username=share_cfg["username"],
+                    password=share_cfg["password"],
+                    domain=share_cfg["domain"],
+                    read_only=False,
+                )
+                if not mounted:
+                    raise RuntimeError("Failed to mount archive share")
+                archive_we_mounted = True
 
             try:
                 # Step 4: Ensure destination directories exist
@@ -154,10 +226,13 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                     dest = os.path.join(ARCHIVE_MOUNT, "TeslaCam", d)
                     os.makedirs(dest, exist_ok=True)
 
-                # Step 5: rsync each event directory
+                # Step 5: rsync each clip. Only a clean rsync (rc 0) counts as archived
+                # and is recorded in the DB; anything else (partial 23, error, timeout)
+                # is a failure to retry next run — never recorded, never deleted.
                 clips_copied = 0
                 bytes_copied = 0
                 clips_deleted = 0
+                clips_failed = 0
 
                 for clip in unarchived:
                     if _active_archive["cancelled"]:
@@ -175,26 +250,25 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                     )
                     os.makedirs(dest_dir, exist_ok=True)
 
-                    result = await script_runner.run(
-                        "rsync",
-                        [
-                            "-a", "--partial", "--timeout=60",
-                            src, dest_dir + "/",
-                        ],
-                        timeout=300,
-                    )
+                    rc, stderr = await _archive_one_clip(src, dest_dir)
 
-                    if result.returncode not in (0, 23):
+                    # A cancel that killed rsync surfaces as a non-zero rc here.
+                    if _active_archive["cancelled"]:
+                        raise asyncio.CancelledError()
+
+                    if rc != 0:
+                        # rc 23 (partial), other errors, or 124 (timeout) — not verified.
+                        clips_failed += 1
                         logger.warning(
-                            "Archive job %d: rsync failed for %s: %s",
-                            job_id, clip["clip_file"], result.stderr,
+                            "Archive job %d: clip %s not archived (rsync rc %s): %s",
+                            job_id, clip["clip_file"], rc, stderr[:200],
                         )
                         continue
 
                     clips_copied += 1
                     bytes_copied += clip["size_bytes"]
 
-                    # Record in DB
+                    # Record in DB (only verified copies)
                     async with aiosqlite.connect(db_path) as db:
                         await db.execute("PRAGMA journal_mode=WAL")
                         await db.execute(
@@ -206,23 +280,9 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                         )
                         await db.commit()
 
-                    # Delete from cam if requested
-                    if delete_after:
-                        del_result = await script_runner.run(
-                            "rm", ["-f", src], timeout=10,
-                        )
-                        if del_result.returncode == 0:
-                            clips_deleted += 1
-                            async with aiosqlite.connect(db_path) as db:
-                                await db.execute("PRAGMA journal_mode=WAL")
-                                await db.execute(
-                                    """UPDATE dashcam_archived_clips
-                                       SET deleted_from_cam = 1
-                                       WHERE event_type = ? AND event_dir = ? AND clip_file = ?""",
-                                    (clip["event_type"], clip["event_dir"],
-                                     clip["clip_file"]),
-                                )
-                                await db.commit()
+                    # Deletion from the cam is intentionally NOT done here — the cam is
+                    # mounted read-only and deleting from a live cam image is unsafe.
+                    # (delete_after was already warned about above.)
 
                     # Update progress periodically
                     if clips_copied % 5 == 0 or clips_copied == len(unarchived):
@@ -233,23 +293,44 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                             clips_deleted=clips_deleted,
                         )
 
-                await _update_job(
-                    db_path, job_id,
-                    status="completed",
-                    clips_copied=clips_copied,
-                    bytes_copied=bytes_copied,
-                    clips_deleted=clips_deleted,
-                )
+                # Report honestly: if any clip failed, this is a partial archive, not a
+                # clean success — the failed clips are still on the cam for next run.
+                if clips_failed > 0:
+                    await _update_job(
+                        db_path, job_id,
+                        status="partial",
+                        clips_copied=clips_copied,
+                        bytes_copied=bytes_copied,
+                        clips_deleted=clips_deleted,
+                        error_message=f"{clips_failed} of {len(unarchived)} clips could not be archived; they will retry on the next run.",
+                    )
+                else:
+                    await _update_job(
+                        db_path, job_id,
+                        status="completed",
+                        clips_copied=clips_copied,
+                        bytes_copied=bytes_copied,
+                        clips_deleted=clips_deleted,
+                    )
 
             finally:
-                # Step 6: Unmount archive share
-                logger.info("Archive job %d: unmounting archive share", job_id)
-                await share_browser.unmount_share(ARCHIVE_MOUNT)
+                # Step 6: Unmount the archive share — ONLY if we mounted it, so we
+                # don't tear down a mount the teslausb daemon may be using.
+                if archive_we_mounted:
+                    logger.info("Archive job %d: unmounting archive share", job_id)
+                    await share_browser.unmount_share(ARCHIVE_MOUNT)
+                else:
+                    logger.info("Archive job %d: leaving pre-existing archive mount in place", job_id)
 
         finally:
-            # Step 7: Unmount cam image
-            logger.info("Archive job %d: unmounting cam image", job_id)
-            await script_runner.run("umount", [CAM_MOUNT], timeout=15)
+            # Step 7: Unmount the cam image — ONLY if we mounted it. A pre-existing
+            # mount may belong to the teslausb archiveloop daemon; unmounting it would
+            # disrupt the daemon mid-archive.
+            if cam_we_mounted:
+                logger.info("Archive job %d: unmounting cam image", job_id)
+                await script_runner.run("umount", [CAM_MOUNT], timeout=15)
+            else:
+                logger.info("Archive job %d: leaving pre-existing cam mount in place", job_id)
 
     except asyncio.CancelledError:
         logger.info("Archive job %d: cancelled", job_id)
@@ -497,7 +578,7 @@ async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
         elif key == "status":
             set_clauses.append("status = ?")
             values.append(val)
-            if val in ("completed", "failed", "cancelled"):
+            if val in ("completed", "failed", "cancelled", "partial"):
                 set_clauses.append("completed_at = ?")
                 values.append(datetime.now(timezone.utc).isoformat())
         else:

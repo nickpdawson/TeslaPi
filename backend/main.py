@@ -62,6 +62,12 @@ async def lifespan(app: FastAPI):
     _auto_sync._state["task"] = _auto_sync_task
     logger.info("Auto-sync background loop registered")
 
+    # Start the auto-update-check loop (checks only; never auto-applies)
+    from backend.services.updater import updater as _updater
+
+    _update_check_task = asyncio.create_task(_updater.run_auto_check_loop())
+    logger.info("Auto-update-check background loop registered")
+
     # Start Home Assistant background push loop if configured
     from backend.services import ha_client as _ha_client
 
@@ -90,6 +96,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown: stop auto-sync loop
     await _auto_sync.stop()
+
+    # Shutdown: stop the auto-update-check loop
+    _update_check_task.cancel()
+    try:
+        await _update_check_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown: stop HA push loop and disconnect MQTT
     _ha_client.stop_push_loop()
@@ -158,12 +171,18 @@ _static_dir = Path(settings.static_dir)
 if _static_dir.is_dir():
     app.mount("/assets", StaticFiles(directory=str(_static_dir / "assets")), name="assets")
 
+    _static_root = _static_dir.resolve()
+
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str) -> FileResponse:
         """Serve the SPA index.html for all non-API routes (client-side routing)."""
-        # Try to serve the exact file first
-        file_path = _static_dir / full_path
-        if full_path and file_path.is_file():
-            return FileResponse(str(file_path))
+        # Try to serve the exact file first — but only if it resolves to a real file
+        # strictly inside the static root. Starlette does NOT collapse `..` in the
+        # path param, so without this containment check `GET /../../etc/passwd`
+        # (via a client that doesn't normalize) would read arbitrary files.
+        if full_path:
+            candidate = (_static_root / full_path).resolve()
+            if candidate.is_relative_to(_static_root) and candidate.is_file():
+                return FileResponse(str(candidate))
         # Fall back to index.html for SPA routing
-        return FileResponse(str(_static_dir / "index.html"))
+        return FileResponse(str(_static_root / "index.html"))

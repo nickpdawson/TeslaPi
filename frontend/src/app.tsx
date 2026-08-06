@@ -38,6 +38,20 @@ function AppRouter() {
   );
 }
 
+function NotFound(_props: { default?: boolean; path?: string }) {
+  return (
+    <div class="container" style={{ textAlign: 'center', paddingTop: 'var(--space-8)' }}>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Page not found</h2>
+      <p class="text-muted" style={{ marginBottom: 'var(--space-4)' }}>
+        That page doesn’t exist.
+      </p>
+      <button class="btn btn--primary" onClick={() => route('/')}>
+        Go to Dashboard
+      </button>
+    </div>
+  );
+}
+
 function ShellRoutes(_props: { default?: boolean; path?: string }) {
   // If setup hasn't been checked yet, show nothing (brief flash)
   if (setupComplete.value === null) {
@@ -54,6 +68,7 @@ function ShellRoutes(_props: { default?: boolean; path?: string }) {
         <NetworkPage path="/network" />
         <Settings path="/settings" />
         <LogViewer path="/logs" />
+        <NotFound default />
       </Router>
     </Shell>
   );

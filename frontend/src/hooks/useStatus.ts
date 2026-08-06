@@ -19,7 +19,7 @@ function formatUptime(seconds: number): string {
 }
 
 /** Map snake_case API response to camelCase frontend types */
-function transformStatus(raw: Record<string, unknown>): TeslaPiStatus {
+export function transformStatus(raw: Record<string, unknown>): TeslaPiStatus {
   const sys = (raw.system ?? {}) as Record<string, unknown>;
   const arch = (raw.archive ?? {}) as Record<string, unknown>;
   const mus = (raw.music ?? {}) as Record<string, unknown>;
@@ -30,6 +30,7 @@ function transformStatus(raw: Record<string, unknown>): TeslaPiStatus {
   const uptimeSeconds = Number(sys.uptime_seconds ?? 0);
 
   return {
+    state: (String(raw.state ?? 'idle')) as TeslaPiStatus['state'],
     system: {
       uptime: uptimeSeconds > 0 ? formatUptime(uptimeSeconds) : String(sys.uptime ?? '0m'),
       cpuTemp: Number(sys.cpu_temp_celsius ?? sys.cpuTemp ?? 0),

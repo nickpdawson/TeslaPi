@@ -16,23 +16,33 @@ function formatRelativeTime(isoString: string | null): string {
   return `${days}d ago`;
 }
 
+// Reflect the backend's overall `state` (which weighs archiving/syncing/failure/
+// connected across sub-systems) rather than re-deriving health from archive.status
+// alone — which showed "All Systems Go" during a music sync or a failed archive job.
 function getRingColor(status: TeslaPiStatus): string {
-  if (status.archive.status === 'archiving') return 'var(--color-accent)';
-  if (status.archive.status === 'error' || status.archive.status === 'unreachable') return 'var(--color-warning)';
-  return 'var(--color-success)';
+  if (status.state === 'error') return 'var(--color-error)';
+  if (status.state === 'offline' || status.archive.status === 'unreachable') return 'var(--color-warning)';
+  if (status.state === 'archiving' || status.state === 'syncing') return 'var(--color-accent)';
+  return 'var(--color-success)';  // connected / idle
 }
 
-function getRingLabel(status: TeslaPiStatus): string {
-  if (status.archive.status === 'archiving') return 'Archiving';
-  if (status.archive.status === 'error') return 'Error';
-  if (status.archive.status === 'unreachable') return 'Unreachable';
-  return 'All Systems Go';
+export function getRingLabel(status: TeslaPiStatus): string {
+  switch (status.state) {
+    case 'archiving': return 'Archiving';
+    case 'syncing': return 'Syncing';
+    case 'error': return 'Error';
+    case 'offline': return 'Offline';
+  }
+  // No top-level problem — surface an unreachable archive server if that's the case.
+  if (status.archive.status === 'unreachable') return 'Server Unreachable';
+  if (status.state === 'connected') return 'Connected';
+  return 'All Systems Go';  // idle
 }
 
 export function StatusHero({ status }: StatusHeroProps) {
   const ringColor = getRingColor(status);
   const ringLabel = getRingLabel(status);
-  const isAnimating = status.archive.status === 'archiving';
+  const isAnimating = status.state === 'archiving' || status.state === 'syncing';
 
   return (
     <div class="card card--full" style={{ overflow: 'visible' }}>
