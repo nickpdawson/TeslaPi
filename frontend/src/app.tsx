@@ -10,7 +10,9 @@ import { FileBrowser } from './components/files/FileBrowser';
 import { MusicPage } from './components/music/MusicPage';
 import { NetworkPage } from './components/network/NetworkPage';
 import { SetupWizard } from './components/setup/SetupWizard';
+import { LoginScreen } from './components/auth/LoginScreen';
 import { setupComplete } from './stores/appState';
+import { needsLogin } from './stores/authState';
 
 function AppRouter() {
   useEffect(() => {
@@ -56,6 +58,12 @@ function ShellRoutes(_props: { default?: boolean; path?: string }) {
   // If setup hasn't been checked yet, show nothing (brief flash)
   if (setupComplete.value === null) {
     return null;
+  }
+
+  // Auth gate: once a password is set, an unauthenticated browser sees only the login
+  // screen. Dormant when auth isn't configured (needsLogin stays false).
+  if (needsLogin.value) {
+    return <LoginScreen />;
   }
 
   return (

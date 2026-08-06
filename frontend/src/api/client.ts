@@ -43,6 +43,15 @@ export function formatDetail(detail: unknown): { message?: string; fieldErrors?:
 
 const BASE_URL = import.meta.env.DEV ? '/api' : '/api';
 
+// A 401 on any call (except the auth endpoints themselves) means the session expired
+// or was never established. The auth store registers a handler here to flip the UI to
+// the login screen. Registered via callback so client.ts doesn't import the store
+// (which imports the client) — avoids a circular import.
+let unauthorizedHandler: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: () => void): void {
+  unauthorizedHandler = fn;
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -61,9 +70,16 @@ async function request<T>(
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin', // send the session cookie (same-origin via nginx)
     });
   } catch (err) {
     throw new ApiError(0, 'Network Error', 'Failed to connect to TeslaPi');
+  }
+
+  // Session expired / missing — let the app switch to the login screen. Skip the auth
+  // endpoints: a 401 from /auth/login is just a wrong password, not a dead session.
+  if (response.status === 401 && !path.startsWith('/auth/')) {
+    unauthorizedHandler?.();
   }
 
   if (!response.ok) {

@@ -8,6 +8,7 @@ import { HASettings } from './HASettings';
 import { LockChimeSettings } from './LockChimeSettings';
 import { AutoSyncSettings } from './AutoSyncSettings';
 import { SystemSettings } from './SystemSettings';
+import { SecuritySettings } from './SecuritySettings';
 import { get, put } from '../../api/client';
 import { addNotification } from '../../stores/appState';
 import type { TeslaPiConfig } from '../../api/types';
@@ -423,6 +424,22 @@ export function Settings(_props: SettingsProps) {
         >
           <p class="text-sm text-secondary">
             Reboot, logs, updates, and diagnostics export
+          </p>
+        </Card>
+
+        <Card
+          title="Security"
+          icon={
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0110 0v4" />
+            </svg>
+          }
+          expandable
+          expandContent={<SecuritySettings />}
+        >
+          <p class="text-sm text-secondary">
+            Require a password to access TeslaPi (login gate)
           </p>
         </Card>
       </div>
