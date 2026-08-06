@@ -14,6 +14,28 @@ from backend.services import music_index, music_sync, share_browser
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/music")
 
+
+def _safe_delete_target(mount_point: str, rel_path: str) -> str | None:
+    """Resolve a user-supplied relative path for deletion, or None if it's unsafe.
+
+    Security-critical (fable C3): without this, `../music_share/...` or an absolute
+    path or an escaping symlink could make delete rmtree the NAS source share instead
+    of a folder on the music image. Rules: fully resolve symlinks/.. with realpath,
+    require the result to stay strictly inside the mount root via commonpath (NOT a
+    string prefix — `/mnt/music_share` must not pass the `/mnt/music` root), and refuse
+    the mount root itself.
+    """
+    import os
+
+    target = os.path.realpath(os.path.join(mount_point, rel_path))
+    root = os.path.realpath(mount_point)
+    if target == root:
+        return None  # refuse deleting the drive root
+    if os.path.commonpath([target, root]) != root:
+        return None  # escapes the mount
+    return target
+
+
 # Music share mount management
 MUSIC_SHARE_MOUNT = "/mnt/music_share"
 _mount_lock = asyncio.Lock()
@@ -567,15 +589,12 @@ async def delete_local_music(req: DeleteLocalRequest) -> dict:
                     raise HTTPException(status_code=503, detail=f"Failed to mount music image: {result.stderr}")
 
             try:
-                # Step 3: Delete — resolve symlinks and require the target to stay
-                # strictly within the mount root (commonpath, not a string prefix,
-                # so a sibling like /mnt/music_share can't pass via '../').
-                target = os.path.realpath(os.path.join(mount_point, req.path))
-                root = os.path.realpath(mount_point)
-                if target != root and os.path.commonpath([target, root]) != root:
+                # Step 3: Delete — resolve the target and require it to stay strictly
+                # within the mount root (see _safe_delete_target: commonpath, not a
+                # string prefix, and root itself is refused).
+                target = _safe_delete_target(mount_point, req.path)
+                if target is None:
                     raise HTTPException(status_code=400, detail="Invalid path")
-                if target == root:
-                    raise HTTPException(status_code=400, detail="Refusing to delete the drive root")
 
                 if os.path.isdir(target):
                     loop = asyncio.get_event_loop()
