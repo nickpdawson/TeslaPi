@@ -1636,3 +1636,11 @@ Audited the non-auth Phase 1 items. Most were fixed in 351c51b and several alrea
 **1f detached update restart — CONFIRMED STILL BROKEN (documented, not fixed):** `updater.py:435` runs `systemctl restart teslapi` from inside the teslapi.service cgroup, so systemd SIGKILLs the updater mid-run — the health-check + rollback at lines 436-457 are dead code on the GitHub-update path (and `install.sh:167` also restarts). Correct fix: launch the restart in a `systemd-run --scope` survivor (or a separate one-shot updater unit) that performs the restart→health-check→rollback, so the supervisor outlives the restarted service. **Deferred deliberately**: rewriting the OTA restart mechanism is risky to validate autonomously on the live device (a wrong invocation could leave the in-app updater unable to restart), and the device is updated via `deploy-to-pi.sh` (which restarts cleanly from outside the cgroup) — OTA is user-initiated and secondary. Flag for a supervised session.
 
 **Phase 1 status**: 1a ✓ (auth, built), 1b ✓ (+C3 test), 1c ✓ (tested), 1d ✓, 1e ✓; 1f open (needs a supervised fix). Also 1a's "bind uvicorn to 127.0.0.1 / drop root" sub-items (nginx-only listener, sudo-helper privilege drop) are infra changes deferred with 1f. Totals: **97 backend + 39 frontend = 136 tests.**
+
+### Iteration 79 — Phase 1a hardening: uvicorn bound to 127.0.0.1 (nginx-only listener)
+
+Closed the last low-risk 1a sub-item I could validate autonomously (SOL-001 direct-exposure). The service ran uvicorn `--host 0.0.0.0`, so `:8080` was reachable directly from any host on the network (confirmed: `curl joulesusb:8080/api/health` → 200), bypassing nginx and any front-door controls. nginx already `proxy_pass http://127.0.0.1:8080`, so changing the bind to `--host 127.0.0.1` is transparent through port 80 and closes the hole.
+
+**Hardware-validated after deploy:** port 80 via nginx → 200; direct `:8080` → `000` (refused); `ss -ltnp` shows `LISTEN 127.0.0.1:8080` (was 0.0.0.0). No app-code change, so tests unchanged (97 backend + 39 frontend = 136).
+
+Remaining 1a sub-item — drop root / move mount+gadget+reboot+provision behind a narrowly allowlisted sudo helper — is a substantial, risky privilege-separation refactor (the service is root precisely because it does those ops); deferred with 1f for a supervised session. Phase 1 is otherwise complete.
