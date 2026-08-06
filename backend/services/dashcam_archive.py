@@ -29,6 +29,22 @@ ARCHIVE_MOUNT = "/mnt/archive"
 ARCHIVE_DIRS = ("SavedClips", "SentryClips")
 
 
+def _clip_src_path(event_type: str, event_dir: str, clip_file: str) -> str:
+    """Source clip path on the cam image: <cam>/TeslaCam/<event_type>/<event_dir>/<file>."""
+    return os.path.join(CAM_MOUNT, "TeslaCam", event_type, event_dir, clip_file)
+
+
+def _clip_dest_dir(event_type: str, event_dir: str) -> str:
+    """Destination dir on the archive share: <archive>/<event_type>/<event_dir>.
+
+    Note the asymmetry with the source: clips are read from TeslaCam/<event_type> on the
+    cam but written to <event_type> at the SHARE ROOT (matching the existing teslausb
+    archive layout). Keeping this in one place prevents the Step-4/Step-5 drift where the
+    old code pre-created TeslaCam/<event_type> dirs the writer never used.
+    """
+    return os.path.join(ARCHIVE_MOUNT, event_type, event_dir)
+
+
 def _get_archive_share_config() -> dict | None:
     """Read archive share config from teslausb_setup_variables.conf.
 
@@ -221,12 +237,7 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                 archive_we_mounted = True
 
             try:
-                # Step 4: Ensure destination directories exist
-                for d in ARCHIVE_DIRS:
-                    dest = os.path.join(ARCHIVE_MOUNT, "TeslaCam", d)
-                    os.makedirs(dest, exist_ok=True)
-
-                # Step 5: rsync each clip. Only a clean rsync (rc 0) counts as archived
+                # Step 4: rsync each clip. Only a clean rsync (rc 0) counts as archived
                 # and is recorded in the DB; anything else (partial 23, error, timeout)
                 # is a failure to retry next run — never recorded, never deleted.
                 clips_copied = 0
@@ -238,16 +249,10 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                     if _active_archive["cancelled"]:
                         raise asyncio.CancelledError()
 
-                    src = os.path.join(
-                        CAM_MOUNT, "TeslaCam", clip["event_type"],
-                        clip["event_dir"], clip["clip_file"],
+                    src = _clip_src_path(
+                        clip["event_type"], clip["event_dir"], clip["clip_file"],
                     )
-                    # Archive to root of share: /SavedClips/{event_dir}/
-                    # (matches existing teslausb archive structure)
-                    dest_dir = os.path.join(
-                        ARCHIVE_MOUNT, clip["event_type"],
-                        clip["event_dir"],
-                    )
+                    dest_dir = _clip_dest_dir(clip["event_type"], clip["event_dir"])
                     os.makedirs(dest_dir, exist_ok=True)
 
                     rc, stderr = await _archive_one_clip(src, dest_dir)
