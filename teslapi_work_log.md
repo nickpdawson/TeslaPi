@@ -1624,3 +1624,15 @@ Completed the auth feature (backend landed iter 76). Frontend:
 **Phase 1a (authentication) is COMPLETE** — backend gate + frontend login + settings control, unit-tested and hardware-validated. Totals: **92 backend + 39 frontend = 131 tests.** main is ahead of the v0.2.0 tag with the auth feature (unreleased; next release will include it).
 
 Phase 1 still has non-auth items (1b path traversals, 1c shell injection, 1d OTA supply chain, 1e setup exposure, 1f detached restart) — several likely addressed in 351c51b; worth an audit next. Other remaining: Phase 3 (provisioning, needs fresh hardware), Phase 6 visual UX (needs browser), H2 video streaming (needs NAS).
+
+### Iteration 78 — Phase 1 security audit (1b–1f); locked C3; confirmed 1f still open
+
+Audited the non-auth Phase 1 items. Most were fixed in 351c51b and several already carry tests (test_security_units.py):
+- **1b traversals**: SPA catch-all (main.py containment check) ✓; updater upload `os.path.basename` ✓; music delete uses realpath+commonpath ✓ — extracted `_safe_delete_target` and added `test_music_delete_safety.py` (5 tests: .., sibling NAS mount, absolute path, escaping symlink, root all refused). This is the scariest one (could rmtree the NAS), now regression-guarded. Backend **97 passing** (was 92).
+- **1c injection**: config `_quote` uses shlex.quote (backtick-safe) + key allowlist + control-char reject — tested (`test_quote_is_inert_when_sourced_by_bash` actually sources a backtick payload in bash and asserts no execution); WireGuard `_valid_endpoint`/`_valid_iplist` newline-injection tests; notification env allowlist test. ✓
+- **1d OTA**: manual upload gated behind `settings.allow_unsigned_updates` (default false → 403, refuses before ingesting the body); basename-sanitized. ✓
+- **1e setup exposure**: `/setup/status` masks secrets via `config_manager.MASK` + `is_sensitive_key`. ✓
+
+**1f detached update restart — CONFIRMED STILL BROKEN (documented, not fixed):** `updater.py:435` runs `systemctl restart teslapi` from inside the teslapi.service cgroup, so systemd SIGKILLs the updater mid-run — the health-check + rollback at lines 436-457 are dead code on the GitHub-update path (and `install.sh:167` also restarts). Correct fix: launch the restart in a `systemd-run --scope` survivor (or a separate one-shot updater unit) that performs the restart→health-check→rollback, so the supervisor outlives the restarted service. **Deferred deliberately**: rewriting the OTA restart mechanism is risky to validate autonomously on the live device (a wrong invocation could leave the in-app updater unable to restart), and the device is updated via `deploy-to-pi.sh` (which restarts cleanly from outside the cgroup) — OTA is user-initiated and secondary. Flag for a supervised session.
+
+**Phase 1 status**: 1a ✓ (auth, built), 1b ✓ (+C3 test), 1c ✓ (tested), 1d ✓, 1e ✓; 1f open (needs a supervised fix). Also 1a's "bind uvicorn to 127.0.0.1 / drop root" sub-items (nginx-only listener, sudo-helper privilege drop) are infra changes deferred with 1f. Totals: **97 backend + 39 frontend = 136 tests.**
