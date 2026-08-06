@@ -30,7 +30,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # vitest 4 + jsdom 30 pull an undici that needs a newer Node runtime; on
+          # Node 20 the forks worker fails to start ("webidl.util.markAsUncloneable
+          # is not a function"). Node 22 LTS (matches the vitest 4 engines floor).
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install
