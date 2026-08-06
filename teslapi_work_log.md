@@ -1564,3 +1564,19 @@ Verification on the live Pi (joulesusb): deployed the released build → `/api/h
 Release: https://github.com/nickpdawson/TeslaPi/releases/tag/v0.2.0
 
 Loop continues on Phase 2c / remaining phases at the next scheduled wakeup.
+
+### Iteration 74 — Phase 2c dashcam lifecycle (L1 layout) — Phase 2 now COMPLETE
+
+Reviewed dashcam_archive.py against the 2c checklist; most items were already fixed in the 351c51b batch:
+- delete_after on RO cam: already warns + skips (no rm on a read-only mount). ✓
+- hardcoded cifs share_type: already reads archive_share_type/SHARE_TYPE and passes it to mount_share (honors NFS). ✓
+- _active_archive["process"] + cancel: already assigned in _archive_one_clip and killed by cancel_archive (cancel works mid-clip). ✓
+- ro,loop cam mount while gadget active: acceptable by design — read-only means the host never writes the image, so no corruption; a mid-write FAT read at worst yields a partial file (rsync rc!=0 → retried). Re-architecting to gadget-detach would interrupt recording, which is worse. Documented, left as-is.
+
+Fixed the one real remaining item — **L1 layout mismatch**: old "Step 4" pre-created `ARCHIVE_MOUNT/TeslaCam/{SavedClips,SentryClips}`, but the writer copies to `ARCHIVE_MOUNT/{event_type}/{event_dir}` at the share ROOT (no TeslaCam prefix, matching teslausb's archive layout). So Step 4 left stray empty dirs and contradicted the real destination; Step 5 already makes its own per-clip dirs, so Step 4 was dead code. Removed it and extracted `_clip_src_path` (reads `TeslaCam/<type>`) / `_clip_dest_dir` (writes `<type>` at share root) pure helpers, with tests pinning the source/dest asymmetry (`TeslaCam` must not appear in dest) so it can't re-drift. Backend **84 passing** (was 81).
+
+Deployed (0.2.0 build, commit 716d55a — main is now ahead of the v0.2.0 tag; rolls into the next release). Hardware check: triggered archive job 22012 → mount cam RO → no new clips → unmount, clean. (Write path unexercised only because the cam currently has no unarchived clips; the change removed dead dir-creation, Step 5 handles dirs.)
+
+**Phase 2 (gadget & filesystem integrity) is now COMPLETE**: 2a (disable fail-loud) ✓, 2b (toggle scripts) ✓, 2c (dashcam lifecycle) ✓, 2d (rsync partial codes) ✓, 2e (crash recovery) ✓, 2f (concurrent guard) ✓, 2g (idle-unmount race) ✓.
+
+Remaining plan phases: Phase 1 (auth — needs a user decision on the auth model), Phase 3 (provisioning robustness — hard to validate without a fresh SD-card run), Phase 4 (API contract — partially done), Phase 6 (visual UX — needs a browser), Phase 7 (broaden test coverage). Next loop iteration: Phase 4 remaining items or Phase 7 coverage (both self-directed, testable without hardware/browser).
