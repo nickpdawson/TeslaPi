@@ -1432,3 +1432,17 @@ Instead locked a real prior SECURITY fix that had only indirect coverage: `is_se
 **Verification:** backend **74 passing** (was 73), deterministic 3×; **mutation-verified** — reverting the regex to bare `pass` (re-introducing the COMPASS false-match / the original WIFIPASS-leak-class bug) fails the test. Clean restore via `touch`.
 
 Totals: **74 backend + 36 frontend = 110 tests.** The stop-gate is now OFF, so turns no longer block on the broken Codex review. Music-sync resilience (61–64) + this security guard locked. Next: broaden coverage of other reliability-critical parsers (network_manager nmcli parsing, updater version/status), or the remaining plan items.
+
+### Iteration 66 — ROOT CAUSE of "no music synced in months": orphaned-job reconciliation [deployed + verified on hardware]
+
+Re-read plan + log at turn start. Continued "deploy and monitor" (user directive: 1. commit 2. deploy and monitor). Committed the iter 47–65 hardening batch (351c51b, branch teslapi-hardening) and deployed to the live Pi (joulesusb.dzsec.net). **While monitoring the deployed device, found the likely root cause of the original complaint.**
+
+**The bug:** `music_sync_jobs` row 20 was stuck `status='running'` since **2026-05-08** — files_copied frozen at 10661, `pgrep rsync` = none (no process alive). `status.py:352` maps a `running` job → `music.sync_in_progress = True` → `_determine_system_state` → dashboard permanently reports **"syncing"**. The only in-progress guard was in-memory (`_active_sync` in music_sync.py:56), which does NOT survive a service restart — so a job orphaned by a crash/restart/power-loss stays `running` in the DB forever, pins the UI on "syncing", and (via that same guard path) masks the real idle state. This is almost certainly why "no music has synced in months": the device *looked* busy and never surfaced as idle/ready.
+
+**The fix** (`backend/database.py` `reconcile_interrupted_jobs()`, called once from `main.py` lifespan right after `init_db()`): at startup, mark every `music_sync_jobs`/`dashcam_archive_jobs` row in `('running','pending')` as `'interrupted'` (COALESCE-preserving any existing error_message/completed_at). No sync process survives a restart, so such rows are definitionally orphaned — safe to reconcile unconditionally. Idempotent (a second startup finds nothing). Logs a WARNING only when it actually reconciles rows.
+
+**Verification:**
+- Unit test `test_reconcile_interrupted_jobs`: seeds running + pending + completed jobs (+ a running dashcam job), asserts exactly the 3 orphans flip to `interrupted` and the `completed` row is untouched, then asserts a second call reconciles 0 (idempotent). Deterministic 3×. Backend **75 passing** (was 74).
+- **Live hardware:** manually marked job 20 `interrupted` via python3/sqlite3 on the Pi → `/api/status` immediately flipped from pinned "syncing" to **`state: connected, sync_in_progress: False`** (truthful). Then deployed the permanent fix (version 20260806-162429), confirmed startup runs clean (0 orphans post-fix, expected), health ok, status stays truthful.
+
+Totals: **75 backend + 36 frontend = 111 tests.** The device is unblocked and self-heals on future restarts. This closes the loop on the Phase-0 primary directive from the live side: the resilience engine (61–64) prevents *new* stuck syncs, and this reconciliation clears *already-stuck* ones on restart. Next: exercise a real music sync on the Pi to prove end-to-end copy works now that the drive is unblocked.
