@@ -1609,3 +1609,18 @@ Tests: `test_auth.py` — 7 (salted hash + verify incl. malformed; token roundtr
 **Hardware validation** (joulesusb): deployed the dormant gate, then ran the full flow via curl — dormant (status 200, configured:false) → set-password 200 → gate blocks (status 401, health exempt 200) → wrong login 401 / right login 200 / with-cookie 200 → **disabled to restore the open state** (status 200, configured:false). Device left OPEN so the current login-less frontend keeps working — no breakage.
 
 **Design note (safe increment):** the gate is a backend boundary only so far. There's no UI control to set a password yet, so no lockout risk. Next iteration: frontend login screen + a Settings "set password" control (needs a browser to validate), shipped together so enabling auth is a complete, usable flow.
+
+### Iteration 77 — Phase 1a: frontend login gate + Settings control (auth flow complete)
+
+Completed the auth feature (backend landed iter 76). Frontend:
+- `stores/authState.ts`: `authConfigured`/`authenticated` signals, `needsLogin` computed on the pure `shouldShowLogin(configured, authed)` predicate, `checkAuth/login/logout`. Registers a 401 handler with the API client (via `setUnauthorizedHandler`, no circular import) so a session that expires mid-use flips the whole app to the login screen.
+- `api/client.ts`: `credentials: 'same-origin'` (send the cookie); on a 401 for a non-`/auth/*` path, invoke the handler (a 401 from `/auth/login` is just a wrong password, not a dead session).
+- `LoginScreen.tsx`: full-screen password form, rendered by `app.tsx` `ShellRoutes` when `needsLogin` — dormant when auth isn't configured.
+- `SecuritySettings.tsx` + a "Security" card in Settings: set / change (requires current pw or session) / disable the password.
+- Tests: `authState.test.ts` — shouldShowLogin matrix + onUnauthorized transitions. Frontend **39** (was 36); `tsc --noEmit` clean.
+
+**Hardware validation** (joulesusb): built + deployed full stack; SPA serves (200); login-screen strings present in the built JS bundle; API gate round-trips (set→status 401→login 200→disable 200). **Left the device OPEN** (no password) so I don't lock the owner out with a password I chose — enabling auth is their explicit choice via Settings → Security.
+
+**Phase 1a (authentication) is COMPLETE** — backend gate + frontend login + settings control, unit-tested and hardware-validated. Totals: **92 backend + 39 frontend = 131 tests.** main is ahead of the v0.2.0 tag with the auth feature (unreleased; next release will include it).
+
+Phase 1 still has non-auth items (1b path traversals, 1c shell injection, 1d OTA supply chain, 1e setup exposure, 1f detached restart) — several likely addressed in 351c51b; worth an audit next. Other remaining: Phase 3 (provisioning, needs fresh hardware), Phase 6 visual UX (needs browser), H2 video streaming (needs NAS).
