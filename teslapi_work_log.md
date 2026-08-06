@@ -1595,3 +1595,17 @@ Audited Phase 4. Most items were already fixed in the 351c51b batch:
 Note: the request/response *shape* mismatches in the Phase 4 table (is_dir vs isDirectory, secret round-trip, WireGuard camelCase, etc.) were addressed in 351c51b but need a browser to fully validate end-to-end — out of scope for autonomous verification.
 
 **Loop status honesty:** the phases that can be advanced well without the user/browser/NAS are now largely complete (0 ✓ hw-verified, 2 ✓, 4 ✓ backend+guard, 5 ✓; v0.2.0 released). Remaining: Phase 1 (auth — needs a user decision on the model, highest-value security gap), Phase 3 (provisioning — needs a fresh SD-card boot), Phase 6 (visual UX — needs a browser), Phase 7 (more coverage — open-ended, being added each iteration; now 85 backend + 36 frontend = 121). Next iteration: Phase 7 coverage of another reliability-critical parser, unless the user opts into the Phase 1 auth decision.
+
+### Iteration 76 — Phase 1a: app authentication gate (backend), hardware-validated
+
+User chose (via AskUserQuestion) to implement app auth. Built the backend security boundary — a shared-password gate suited to a single-user home device (not multi-user accounts), designed to be non-breaking:
+
+- **services/auth.py**: pbkdf2_sha256 password hashing (stdlib, 200k iters, per-password salt); stateless HMAC-signed session cookies (`<exp>.<sig>`) with a per-install secret stored in app_settings; `set_password` rotates the secret so a password change logs everyone out.
+- **routers/auth.py**: `/auth/status` (unprotected — frontend uses it to choose login vs app), `/auth/login`, `/auth/logout`, `/auth/set-password` (first-time set is open per the setup trust model; changing an existing password requires the current password or a live session), `/auth/disable`.
+- **main.py middleware**: once a password is configured, every `/api/*` request needs a valid session cookie — except `/api/health`, `/api/auth/*`, `/api/setup/*`. **Dormant until a password is set**, so existing installs and the current frontend are unaffected.
+
+Tests: `test_auth.py` — 7 (salted hash + verify incl. malformed; token roundtrip/expiry/tamper; gate dormant→blocks→login→logout; tampered cookie → 401; change-password requires current-pw-or-session). Backend **92 passing** (was 85), deterministic 3×.
+
+**Hardware validation** (joulesusb): deployed the dormant gate, then ran the full flow via curl — dormant (status 200, configured:false) → set-password 200 → gate blocks (status 401, health exempt 200) → wrong login 401 / right login 200 / with-cookie 200 → **disabled to restore the open state** (status 200, configured:false). Device left OPEN so the current login-less frontend keeps working — no breakage.
+
+**Design note (safe increment):** the gate is a backend boundary only so far. There's no UI control to set a password yet, so no lockout risk. Next iteration: frontend login screen + a Settings "set password" control (needs a browser to validate), shipped together so enabling auth is a complete, usable flow.
