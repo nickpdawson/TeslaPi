@@ -78,13 +78,29 @@ async def _ensure_music_share_mounted() -> str:
         return MUSIC_SHARE_MOUNT
 
 
+def _should_unmount_idle(elapsed: float, sync_active: bool) -> bool:
+    """Whether the idle timer should lazy-unmount the music share this cycle.
+
+    A sync uses the SAME mountpoint (music_sync.SHARE_MOUNT == MUSIC_SHARE_MOUNT ==
+    /mnt/music_share), so unmounting while a sync runs would `umount -l` the source out
+    from under rsync mid-transfer. Only unmount once idle AND no sync is active.
+    """
+    return elapsed >= MOUNT_IDLE_TIMEOUT and not sync_active
+
+
 async def _schedule_unmount() -> None:
     """Unmount the music share after idle timeout."""
     global _last_mount_access
     while True:
         await asyncio.sleep(30)  # Check every 30s
         elapsed = time.time() - _last_mount_access
-        if elapsed >= MOUNT_IDLE_TIMEOUT:
+        sync_active = music_sync._active_sync.get("job_id") is not None
+        if sync_active:
+            # Defer while a sync holds the share; keep checking. The sync manages its
+            # own unmount when it finishes.
+            _last_mount_access = time.time()  # push the idle window past the sync
+            continue
+        if _should_unmount_idle(elapsed, sync_active):
             if await share_browser.is_mounted(MUSIC_SHARE_MOUNT):
                 logger.info("Unmounting idle music share after %.0fs", elapsed)
                 await share_browser.unmount_share(MUSIC_SHARE_MOUNT)

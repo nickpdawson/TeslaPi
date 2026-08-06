@@ -11,6 +11,13 @@ from backend.services import script_runner
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/gadget")
 
+# The gadget enable/disable scripts that the sync/customization paths use and that
+# build.sh + install.sh actually install under /opt/teslapi/deploy. The old relative
+# "run/enable_gadget.sh" managed the inherited teslausb gadget and was never installed,
+# so /gadget/toggle failed 100% on a real device — unify on the installed scripts.
+GADGET_ENABLE = "/opt/teslapi/deploy/teslapi-gadget-enable.sh"
+GADGET_DISABLE = "/opt/teslapi/deploy/teslapi-gadget-disable.sh"
+
 
 @router.get("/status", response_model=GadgetStatus)
 async def get_gadget_status() -> GadgetStatus:
@@ -61,7 +68,7 @@ async def toggle_gadget(request: GadgetToggleRequest) -> GadgetStatus:
             drives=["cam", "music", "lightshow", "boombox"] if request.enabled else [],
         )
 
-    script = "run/enable_gadget.sh" if request.enabled else "run/disable_gadget.sh"
+    script = GADGET_ENABLE if request.enabled else GADGET_DISABLE
     action = "enable" if request.enabled else "disable"
 
     logger.info("Toggling USB gadget: %s", action)
