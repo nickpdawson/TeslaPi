@@ -142,7 +142,15 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
             "bash", [GADGET_DISABLE], timeout=15,
         )
         if result.returncode != 0:
-            logger.warning("Gadget disable returned %d: %s (may already be disabled)", result.returncode, result.stderr)
+            # The disable script returns 0 for "already disabled" and non-zero ONLY when
+            # the gadget is still bound to a UDC (the car can still write the drives).
+            # Mounting the backing image RW now would put two writers on one FAT →
+            # corruption. Abort BEFORE mounting; we haven't touched the image, and the
+            # gadget is left as-is (car keeps its drives — the safe, recoverable state).
+            raise RuntimeError(
+                f"USB gadget disable failed (rc={result.returncode}): {result.stderr.strip()}. "
+                "Refusing to mount the music image to avoid drive corruption."
+            )
 
         # Tracks whether the music image is confirmed unmounted before we re-present
         # the gadget. The image must NEVER be re-exported to the car while still
