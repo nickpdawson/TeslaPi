@@ -1545,3 +1545,22 @@ Verification:
 - **Hardware (the important one):** re-synced an already-present album on the live Pi (job 25) → completed 5/5, no error; journal shows disable → `rsync completed` → re-enabling; `/api/gadget/status` back to enabled with all 4 drives (boombox/cam/lightshow/music). The hardened script did NOT break the working corruption-critical path — disable still succeeds and the sync round-trips cleanly.
 
 Deployed version 20260806-184231. **Phase 2 now: 2a/2b/2d/2e/2f/2g DONE; only 2c (dashcam archive lifecycle) remains** — several sub-items (ro,loop-while-active "safe" mount, delete_after rm on ro mount, hardcoded cifs share_type, _active_archive["process"] never set → cancel no-op, TeslaCam Saved/Sentry vs {event_type} layout). 2c needs the cam image + careful testing; next iteration.
+
+### Iteration 73 — RELEASE v0.2.0 to GitHub (user-directed)
+
+User: "if you are confident in your fixes, push and update and release to github along with update/upgrade instructions." Cut the first real TeslaPi release.
+
+Pre-flight: full suite green — **81 backend + 36 frontend = 117 tests**.
+
+Release engineering:
+- **Versioning aligned end-to-end.** pyproject 0.1.0 → 0.2.0. build.sh now writes the semver as `VERSION` line 1 (commit line 2, build-date line 3) — previously date-based, which broke the updater's semver comparison against release tags. So pyproject → VERSION → /api/health → in-app updater all agree now.
+- **Branching.** teslapi-hardening (my working branch) fast-forwarded cleanly onto origin/main (main = TeslaPi release line; main-dev is the unrelated upstream-teslausb tracking branch, 1210 commits off). Pushed main ac8795a→…; tagged v0.2.0.
+- **GitHub release** published with `teslapi.tar.gz` asset (the exact name install.sh/configure-web.sh/updater expect at releases/latest/download). Notes = CHANGELOG v0.2.0 section. Verified: `releases/latest/download/teslapi.tar.gz` → HTTP 200; `/releases/latest` API returns tag v0.2.0 + asset.
+- **Docs:** new CHANGELOG.md; README "Updating" expanded to 3 paths (in-app updater / deploy-to-pi.sh / manual update.sh) + post-update health check + the re-index-after-share-reorg note + known limitations (no app auth yet, provisioning rough edges, dashcam 2c pending).
+- **Post-release fix folded in:** /api/health read stale pip metadata (showed 0.1.0 on a 0.2.0 device) — now reads the deployed VERSION file (same source the updater uses). Since the release was minutes old with zero downloads, amended v0.2.0 in place (moved tag, re-uploaded asset) rather than cutting v0.2.1.
+
+Verification on the live Pi (joulesusb): deployed the released build → `/api/health` version **0.2.0**; updater endpoint reports `current 0.2.0 / latest v0.2.0 / up_to_date`. Release is live, discoverable by the in-app updater, and the device runs it.
+
+Release: https://github.com/nickpdawson/TeslaPi/releases/tag/v0.2.0
+
+Loop continues on Phase 2c / remaining phases at the next scheduled wakeup.
