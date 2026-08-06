@@ -37,10 +37,21 @@ logger = logging.getLogger(__name__)
 
 
 def _get_version() -> str:
+    # The deployed VERSION file (line 1 = semver) is the source of truth — a deploy
+    # copies backend/ but does not reinstall the pip package, so pkg_version() metadata
+    # goes stale. The updater reads this same file; keep /api/health consistent with it.
+    try:
+        version_file = Path("/opt/teslapi/VERSION")
+        if version_file.exists():
+            first = version_file.read_text().splitlines()[0].strip()
+            if first:
+                return first
+    except Exception:
+        pass
     try:
         return pkg_version("teslapi")
     except Exception:
-        return "0.1.0"
+        return "0.2.0"
 
 
 @asynccontextmanager
