@@ -1499,3 +1499,17 @@ The full fix chain is validated: reconcile the stuck job (iter 66) → re-index 
 **State of the primary goal:** DONE and hardware-verified. Music + video sync both work; the resilience engine (mount-safety, stall/retry, exit-code policy, reconciliation) is hardened and unit-covered (76 backend + 36 frontend = 112 tests). Remaining music item is operational, not code: the user must decide how to handle the 2.6 TB duplicated share (selective sync vs de-dupe the source) — the drive can't hold it all. Committed: 95f184e (counter), plus iter 66–68 fixes all deployed.
 
 Next loop iterations: proceed through the remaining plan phases that don't need the user or a browser — Phase 2 (gadget-system unification / toggle-calls-uninstalled-scripts), Phase 3 (provisioning), and broaden Phase 7 test coverage. Phase 1 (auth model) needs a user decision; Phase 6 visual polish needs a browser.
+
+### Iteration 70 — physical-drive verification: new album synced and confirmed ON the car's drive
+
+User pushed to actually test (good instinct). API "completed" + bytes_copied isn't proof the bytes reach the FAT image the car reads — so verified at the block level by loop-mounting `/backingfiles/music_disk.bin` read-only.
+
+Findings:
+- The drive already holds a large library: **4,559 artist dirs under `/Music/`** (sync dest is `MUSIC_DEST=/mnt/music/Music`, image `MUSIC_IMAGE=/backingfiles/music_disk.bin` — same file inspected, no mismatch). So "no music in months" = no NEW syncs since May, not an empty drive.
+- Timestamp puzzle resolved: every file showed April mtimes (newest anywhere = 2026-05-08) even though syncs ran today. Cause: rsync `-a` preserves source mtimes — a correct sync writes files stamped with their April source dates, not "now". So old timestamps are EXPECTED, not evidence of a no-op.
+- **Definitive test:** picked `/Empire of the Sun/Walking on a Dream` (artist confirmed ABSENT from the drive's 4559-artist list, present on share), synced it (job 24 → completed, 5/5 files, 26,400,581 bytes), then re-mounted the image RO: `/Music/Empire of the Sun/Walking on a Dream/` is now present with all 4 tracks. New album that wasn't on the drive is now physically on the drive → sync works end-to-end at the hardware level.
+- files_copied counter (iter 69 fix) reported a clean 5/5 here too.
+
+Method note for future: loop-mount the backing image `mount -o ro,loop /backingfiles/music_disk.bin /tmp/x` to verify sync results physically — read-only, safe (two readers), and the definitive check that API success actually reached the drive. rsync `-a` mtime preservation means "recency of files on the drive" is NOT a valid freshness signal; verify by presence/absence of a known-new album instead.
+
+Primary directive remains DONE — now proven at the physical-drive level, not just the API. Awaiting user's share de-dupe; will re-index + re-validate after.
