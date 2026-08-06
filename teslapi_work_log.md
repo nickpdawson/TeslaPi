@@ -1644,3 +1644,16 @@ Closed the last low-risk 1a sub-item I could validate autonomously (SOL-001 dire
 **Hardware-validated after deploy:** port 80 via nginx → 200; direct `:8080` → `000` (refused); `ss -ltnp` shows `LISTEN 127.0.0.1:8080` (was 0.0.0.0). No app-code change, so tests unchanged (97 backend + 39 frontend = 136).
 
 Remaining 1a sub-item — drop root / move mount+gadget+reboot+provision behind a narrowly allowlisted sudo helper — is a substantial, risky privilege-separation refactor (the service is root precisely because it does those ops); deferred with 1f for a supervised session. Phase 1 is otherwise complete.
+
+### Iteration 80 — Phase 7: cover the rsync progress stream (resilience engine core)
+
+Audited the WiFi parsers first (SOL-019): the backend produces correct snake_case (in_use/ip_address/auto_connect via pydantic models) — the drift was the frontend half, which needs a browser, so no backend bug there.
+
+Added the missing coverage on the sync engine's most subtle-bug-prone orchestration piece — `_stream_rsync_progress` (the cumulative byte accounting across rsync retries, previously untested; only the line parser `_parse_progress2` was covered in iter 61). `test_rsync_progress_stream.py` (fake process/stdout, no real subprocess):
+- **cumulative offset**: DB `bytes_copied` = `bytes_offset + run_bytes`, so the UI total stays monotonic across a killed-and-retried run (mutation-relevant: dropping the offset → 105000 assertion fails).
+- **chunk-boundary reassembly**: a `\r`-terminated progress2 line split across two `read()` chunks is rebuilt from the buffer and parsed (5,000 bytes, to-chk=2/10 → 8 files).
+- **stall detection**: `_RsyncStalled` raised when stdout is silent past `stall_timeout`.
+
+Backend **99 passing** (was 97). Totals: **99 backend + 39 frontend = 138 tests.** The Phase-0 resilience engine now has coverage on all four subtle-bug surfaces (progress parse, mountinfo parse, image-release fail-safe, exit-code policy) PLUS the streaming cumulative accounting and the reconciliation of orphaned jobs.
+
+The autonomous runway is genuinely short now: remaining substantive items (1f OTA restart, root-drop, Phase 3 provisioning, Phase 6 visual UX, H2 NAS streaming) each need a supervised session / fresh hardware / a browser / the NAS. Next autonomous options are incremental (more parser coverage, doc polish) — flagged to the user that pausing to pair may beat further solo iterations.
