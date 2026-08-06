@@ -1580,3 +1580,18 @@ Deployed (0.2.0 build, commit 716d55a — main is now ahead of the v0.2.0 tag; r
 **Phase 2 (gadget & filesystem integrity) is now COMPLETE**: 2a (disable fail-loud) ✓, 2b (toggle scripts) ✓, 2c (dashcam lifecycle) ✓, 2d (rsync partial codes) ✓, 2e (crash recovery) ✓, 2f (concurrent guard) ✓, 2g (idle-unmount race) ✓.
 
 Remaining plan phases: Phase 1 (auth — needs a user decision on the auth model), Phase 3 (provisioning robustness — hard to validate without a fresh SD-card run), Phase 4 (API contract — partially done), Phase 6 (visual UX — needs a browser), Phase 7 (broaden test coverage). Next loop iteration: Phase 4 remaining items or Phase 7 coverage (both self-directed, testable without hardware/browser).
+
+### Iteration 75 — Phase 4 (API contract drift): verified backend items done, added drift guard
+
+Audited Phase 4. Most items were already fixed in the 351c51b batch:
+- **Sync New (H3)**: no `modified_time` anywhere; `/sync/new` uses the `synced=0` watermark (correct design). ✓
+- **Auto-update toggle (M-F5)**: both GET and PUT `/updates/auto-check` exist; frontend uses both — no 405. ✓
+- **Dashcam detail (H2, half)**: `get_event` reads the DB (`_get_event_detail_from_db`), no longer scans /mnt/cam — the per-event 404 is fixed.
+
+**Path-level contract is clean**: enumerated 89 backend routes (router prefix + decorator) and all literal frontend API paths resolve to one — zero 404/405 drift. Codified as `test_api_contract_drift.py` (strips query strings, skips runtime-templated paths) so it can't silently re-drift, per the plan's explicit recommendation. Backend **85 passing** (was 84).
+
+**Genuinely remaining Phase 4 item — H2 video streaming half**: `serve_video` reads from `TESLACAM_ROOT=/mnt/cam/TeslaCam`, which is unmounted while the gadget is active, so archived clips can't stream. The fix (mount the archive share on demand, resolve each archived clip's NAS path from the DB, stream with Range) needs a reachable NAS + on-demand archive mount to build and validate — deferred as a hardware-dependent item, not implemented blind.
+
+Note: the request/response *shape* mismatches in the Phase 4 table (is_dir vs isDirectory, secret round-trip, WireGuard camelCase, etc.) were addressed in 351c51b but need a browser to fully validate end-to-end — out of scope for autonomous verification.
+
+**Loop status honesty:** the phases that can be advanced well without the user/browser/NAS are now largely complete (0 ✓ hw-verified, 2 ✓, 4 ✓ backend+guard, 5 ✓; v0.2.0 released). Remaining: Phase 1 (auth — needs a user decision on the model, highest-value security gap), Phase 3 (provisioning — needs a fresh SD-card boot), Phase 6 (visual UX — needs a browser), Phase 7 (more coverage — open-ended, being added each iteration; now 85 backend + 36 frontend = 121). Next iteration: Phase 7 coverage of another reliability-critical parser, unless the user opts into the Phase 1 auth decision.
