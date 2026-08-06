@@ -10,11 +10,67 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend.services import share_browser, dashcam_archive
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dashcam")
 
 TESLACAM_ROOT = Path("/mnt/cam/TeslaCam")
+
+# Archived clips live on the NAS archive share (written by dashcam_archive to
+# <share>/<event_type>/<event_dir>/<clip>), NOT on the cam image — which is unmounted
+# while the USB gadget owns it. Serve playback from a dedicated READ-ONLY mount of that
+# share so all archived events are viewable (H2/SOL-013). Read-only + a separate
+# mountpoint from the archive job's RW /mnt/archive means no interference or corruption.
+ARCHIVE_PLAY_MOUNT = "/mnt/archive_play"
+
+
+def _resolve_media_file(root: Path, rel_path: str) -> Path | None:
+    """Resolve a request path under ``root`` for media serving, or None if unsafe.
+
+    Rejects traversal (realpath must stay within root) and non-mp4 targets. Same
+    containment discipline as the music-delete guard.
+    """
+    clean = PurePosixPath(rel_path).as_posix()
+    if ".." in clean.split("/"):
+        return None
+    resolved = (root / clean).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    if not resolved.name.endswith(".mp4"):
+        return None
+    return resolved
+
+
+async def _ensure_archive_mounted() -> Path | None:
+    """Ensure the archive share is mounted read-only for playback. Returns its root or None.
+
+    On demand and left mounted (read-only, so it's safe to keep up and makes seeking
+    fast). Returns None if the archive share isn't configured or the mount fails, so the
+    caller can surface a clear error instead of a bare 404.
+    """
+    if settings.dev_mode:
+        return None
+    root = Path(ARCHIVE_PLAY_MOUNT)
+    if await share_browser.is_mounted(ARCHIVE_PLAY_MOUNT):
+        return root
+    cfg = dashcam_archive._get_archive_share_config()
+    if not cfg:
+        return None
+    os.makedirs(ARCHIVE_PLAY_MOUNT, exist_ok=True)
+    ok = await share_browser.mount_share(
+        share_type=cfg["share_type"],
+        server=cfg["server"],
+        path=cfg["share_name"],
+        mountpoint=ARCHIVE_PLAY_MOUNT,
+        username=cfg["username"],
+        password=cfg["password"],
+        domain=cfg["domain"],
+        read_only=True,
+    )
+    return root if ok else None
 
 # Map subfolder names to event types
 _TYPE_MAP = {
@@ -431,24 +487,31 @@ async def serve_video(request: Request, path: str):
             detail="Video serving not available in dev mode. Use real TeslaCam files on the Pi.",
         )
 
-    # Security: prevent path traversal
-    clean = PurePosixPath(path).as_posix()
-    if ".." in clean:
+    if ".." in PurePosixPath(path).as_posix():
         raise HTTPException(status_code=403, detail="Path traversal not allowed")
 
-    file_path = TESLACAM_ROOT / clean
-    file_resolved = file_path.resolve()
+    # Archived clips live on the NAS archive share; serve from a read-only mount of it.
+    # Fall back to the live cam image only if it happens to be mounted (gadget down).
+    file_resolved: Path | None = None
+    archive_root = await _ensure_archive_mounted()
+    if archive_root is not None:
+        candidate = _resolve_media_file(archive_root, path)
+        if candidate is not None and candidate.is_file():
+            file_resolved = candidate
 
-    try:
-        file_resolved.relative_to(TESLACAM_ROOT.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+    if file_resolved is None and TESLACAM_ROOT.exists():
+        candidate = _resolve_media_file(TESLACAM_ROOT, path)
+        if candidate is not None and candidate.is_file():
+            file_resolved = candidate
 
-    if not file_resolved.is_file():
+    if file_resolved is None:
+        # Distinguish "can't reach the archive" from "clip genuinely missing".
+        if archive_root is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Archive share not reachable — cannot stream archived clips.",
+            )
         raise HTTPException(status_code=404, detail="Video file not found")
-
-    if not file_resolved.name.endswith(".mp4"):
-        raise HTTPException(status_code=400, detail="Only MP4 files are served")
 
     file_size = file_resolved.stat().st_size
     range_header = request.headers.get("range")
