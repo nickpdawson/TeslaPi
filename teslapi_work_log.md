@@ -1460,3 +1460,25 @@ Continued monitoring the deployed device. Findings + fixes this iteration:
 **(d) Fixed a datetime/str API-contract bug class (Phase 4).** Monitoring showed `PydanticSerializationUnexpectedValue` on every `/api/status` once an archive/sync had completed: three datetime-typed fields were assigned raw SQLite strings — `archive.last_archive_at` (job.completed_at), `music.last_sync_at` (job.completed_at), and `DashcamEvent.timestamp` (event.archived_at). Worse, the HA push loop calls `.last_archive_at.isoformat()`, which would `AttributeError` on a str whenever a completed archive existed + HA push enabled. Added `_parse_db_timestamp()` (handles both SQLite shapes: `'YYYY-MM-DD HH:MM:SS'` and Python ISO-with-tz; passthrough datetime; None on garbage) and routed all three sites through it. Test `test_parse_db_timestamp_handles_both_sqlite_formats` (both formats, passthrough, None, garbage; asserts `.isoformat()` doesn't raise), deterministic 3×. **76 backend passing** (was 75). Deployed (version 20260806-163136); verified **0 serialization warnings** under 8× `/api/status` load and both fields serialize cleanly.
 
 Totals: **76 backend + 36 frontend = 112 tests.** Live device: state truthful (`connected`), video sync working automatically, music unblocked and awaiting a backfill go-ahead. Remaining for "music syncing works" end-to-end: user approval for the ~271GB backfill (or a small selective sync as a functional proof).
+
+### Iteration 68 — COMPLETE root cause of "no music in months": stale index predating a share reorg
+
+The user chose "small test sync first." Triggered a selective sync of `/Alizée/Remixes 1087` (2 files, 10MB). Result exposed the real root cause — and it is NOT a code bug in the sync engine, which worked flawlessly.
+
+**The sync pipeline is provably correct.** Journal for job 21: gadget disabled → music image mounted → CIFS source `//matterhorn.dzsec.net/zmutt_music` mounted (succeeded) → rsync → source/image unmounted → gadget re-enabled. The entire mount-safety choreography (the thing iters 61–64 hardened) executed perfectly. The transfer failed with rsync code 23: `link_stat ".../02 L'Alizé (...).1.mp3" failed: No such file or directory`.
+
+**Diagnosis (read-only ground-truthing via the app's own share_browser, mounted the share RO and compared to the DB):**
+- The index (`music_files`, 13776 rows) was built **2026-04-10 21:56–23:11** in a single run.
+- The share has a top-level **`.stash_2026-04-21`** directory — it was **reorganized on 2026-04-21, 11 days AFTER indexing**. A dedup/reorg pass renamed album dirs, created duplicate `.N.mp3` copies (e.g. `01 - Kryptonite.1.mp3 … .13.mp3`), changed separators (` - ` vs ` `), and changed extensions (`.m4a` → `.mp3`).
+- Concrete mismatch — INDEX: `/3 Doors Down/The Better Life 914/01 Kryptonite.m4a` (spurious album number `914`, also appears as `4040`; no ` - `; `.m4a`). SHARE: `/3 Doors Down/The Better Life/01 - Kryptonite.1.mp3`. **No index path resolves on the current share** — random sample of 40 oldest + 40 newest clean paths = 0/80 present; 30/30 `.N.` paths absent.
+- The indexer (`music_index.py:143`) records the **real** relative filesystem path (`"/" + rel` from `os.walk`), so the 04-10 paths were correct *then* — the index is simply 4 months stale and predates the reorg.
+
+**Full causal chain for "no music synced in months":**
+1. Share reorganized 2026-04-21 → all 04-10 index paths went stale.
+2. Job 20 (05-08) full-synced the stale index → every rsync `link_stat` failed → the old (pre-hardening) code marked the whole index `synced=1` optimistically and the job was orphaned as `status='running'`.
+3. That orphaned row pinned the dashboard on "syncing" for 3 months (fixed iter 66 — reconciliation).
+4. Even after unblocking, syncs fail because the index is stale.
+
+**Fix: re-index against the current share, then sync.** The re-index is read-only w.r.t. the drive/gadget (walks the share, updates the DB) — safe to run. Triggered `POST /api/music/library/index` (walking 2191 artist dirs; slow over WAN CIFS). Next: when indexing completes, re-run a small selective sync to prove end-to-end success on real, current paths, then report the ~backfill scope to the user.
+
+No code change this iteration — the finding is operational (stale data + a source-side reorg), and the sync engine behaved correctly (failed safe, reported "partial" honestly, re-enabled the gadget). Tests remain 76 backend + 36 frontend = 112.
