@@ -13,8 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import settings
 from backend.database import init_db
+from backend.services import auth as auth_service
 from backend.routers import (
     archive,
+    auth,
     auto_sync,
     config,
     customization,
@@ -153,7 +155,33 @@ else:
         allow_headers=["*"],
     )
 
+# Auth gate: once a password is set, every /api/* request needs a valid session
+# cookie — except health (monitoring), the auth endpoints themselves (login/status),
+# and setup (must run before auth exists). Dormant until a password is configured, so
+# existing installs are unaffected until the owner opts in by setting one.
+_AUTH_EXEMPT_PREFIXES = ("/api/auth/", "/api/setup/")
+_AUTH_EXEMPT_EXACT = ("/api/health", "/api/auth", "/api/setup")
+
+
+def _auth_exempt(path: str) -> bool:
+    return path in _AUTH_EXEMPT_EXACT or path.startswith(_AUTH_EXEMPT_PREFIXES)
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and not _auth_exempt(path):
+        if await auth_service.is_auth_configured():
+            token = request.cookies.get(auth_service.SESSION_COOKIE)
+            if not await auth_service.verify_session_token(token):
+                return JSONResponse(
+                    status_code=401, content={"detail": "Authentication required"}
+                )
+    return await call_next(request)
+
+
 # API routers
+app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(status.router, prefix="/api", tags=["status"])
 app.include_router(archive.router, prefix="/api", tags=["archive"])
 app.include_router(system.router, prefix="/api", tags=["system"])
