@@ -1531,3 +1531,17 @@ Tests: `test_music_router.py` added (idle-unmount safety predicate; gadget-toggl
 - 2c: dashcam archive lifecycle (ro,loop mount called "safe" while gadget active; delete_after rm on a ro mount; hardcoded cifs share_type; _active_archive["process"] never set so cancel is a no-op; TeslaCam Saved/Sentry vs {event_type} layout mismatch).
 
 Next iteration: 2a (with hardware test) or 2c, or broaden Phase 7 coverage. User is de-duping the share in the background; will re-index + re-validate music when they signal done.
+
+### Iteration 72 — Phase 2a: disable-script fail-loud on UDC unbind (corruption-critical), unit + hardware tested
+
+Fixed the last high-risk Phase 2 item. The gadget-disable path was NOT fail-safe: `teslapi-gadget-disable.sh` always exited 0 (every teardown line `|| true`, always ends "USB gadget disabled"), and `music_sync.py:144` only logged a warning on non-zero rc before proceeding to mount the backing image RW. If the UDC unbind ever failed, the car would still bind the drive while the host mounted it read-write → two writers on one FAT → corruption.
+
+Fix (two parts):
+1. **teslapi-gadget-disable.sh**: after `echo "" > $GADGET/UDC`, read it back; if still non-empty (gadget still bound), print an error and `exit 1` BEFORE any teardown. Returns 0 only when the UDC is confirmed unbound (or the gadget was never configured). Added `TESLAPI_GADGET_DIR` env override (default unchanged) purely so the safety logic is testable against a fake configfs tree.
+2. **music_sync._run_sync**: a non-zero disable rc now raises RuntimeError and aborts BEFORE the image mount. We haven't touched the image and the gadget is left as-is (car keeps its drives — the safe, recoverable state); the existing `except` marks the job failed and `finally` releases `_active_sync`.
+
+Verification:
+- Unit (subprocess-level, `test_gadget_disable_script.py`): no-gadget→0; writable UDC (unbind clears it)→0 + "confirmed unbound"; read-only UDC (unbind rejected)→exit 1 + "still bound" + gadget NOT torn down. Backend **81 passing** (was 78), 3×.
+- **Hardware (the important one):** re-synced an already-present album on the live Pi (job 25) → completed 5/5, no error; journal shows disable → `rsync completed` → re-enabling; `/api/gadget/status` back to enabled with all 4 drives (boombox/cam/lightshow/music). The hardened script did NOT break the working corruption-critical path — disable still succeeds and the sync round-trips cleanly.
+
+Deployed version 20260806-184231. **Phase 2 now: 2a/2b/2d/2e/2f/2g DONE; only 2c (dashcam archive lifecycle) remains** — several sub-items (ro,loop-while-active "safe" mount, delete_after rm on ro mount, hardcoded cifs share_type, _active_archive["process"] never set → cancel no-op, TeslaCam Saved/Sentry vs {event_type} layout). 2c needs the cam image + careful testing; next iteration.
