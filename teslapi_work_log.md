@@ -1679,3 +1679,13 @@ Fix: archived clips live on the NAS at `<archive_share>/<event_type>/<event_dir>
 **Hardware-validated** (joulesusb): a real archived clip streams **206 Partial Content** (`Content-Range: bytes 0-1048575/78445864`) on a Range request and **200** on a full GET; a `../` traversal → **403**. The RO mount lands in teslapi.service's private mount namespace (invisible to SSH `mount`, per [[feedback_teslapi_mount_namespace]]) — the successful stream confirms it. Backend **101 passing** (was 99).
 
 **"Video syncing works" is now complete end-to-end**: dashcam auto-archive (write, verified iter 67) + archived-clip playback (read, this iter). Combined with music sync (verified iters 68-70), the loop's PRIMARY directive — music AND video sync working, resilient, reliable — is fully delivered and hardware-verified. Totals: **101 backend + 39 frontend = 140 tests.**
+
+### Iteration 83 — lock re-index reconciliation (protects de-dupe flow); fix dev-mock crash
+
+Primary goal is complete; this iteration de-risks the user's IMMINENT workflow (share de-dupe → re-index → sync) and fixes a bug found along the way.
+
+Verified `index_library` reconciliation is correct and locked it with an integration test (`test_index_reconciliation.py`, real walk over a temp share, dev_mode forced off): a file removed from the share is **pruned** (`stale = existing - current` → DELETE), a new file is inserted `synced=0`, and a changed file (mtime differs) resets `synced=0` so Sync New re-copies it. So after the de-dupe removes the ~3400 `.N.` duplicates, a re-index will correctly drop them and the index will match the cleaned share — no orphaned-path partial syncs.
+
+Bug found + fixed while testing: in dev_mode, `index_library` emits MOCK data whose album names are random (`template + (year)`) and can collide → duplicate paths → the whole dev re-index crashed on a UNIQUE violation. `INSERT OR IGNORE` in the mock insert path fixes it (dev-only; verified 12,795 mock tracks index cleanly). Also documents (in the test) that conftest's forced dev_mode makes index_library mock rather than walk — a gotcha for future index tests.
+
+Backend **102 passing** (was 101). Totals: **102 backend + 39 frontend = 141 tests.** All green; CI green on main.
