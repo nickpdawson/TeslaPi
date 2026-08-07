@@ -367,8 +367,11 @@ async def _index_mock(db_path: str) -> dict:
         batch_size = 500
         for i in range(0, len(all_files), batch_size):
             batch = all_files[i : i + batch_size]
+            # OR IGNORE: randomly-generated mock album names can collide (same template
+            # + year), producing duplicate paths — without this the whole dev re-index
+            # crashes on a UNIQUE violation. Dropping the rare collision is fine here.
             await db.executemany(
-                """INSERT INTO music_files
+                """INSERT OR IGNORE INTO music_files
                    (path, artist, album, filename, size_bytes, modified_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 [(f["path"], f["artist"], f["album"],
