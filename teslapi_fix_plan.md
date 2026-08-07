@@ -6,6 +6,29 @@ Both reviews reach the same bottom line: **do not expose this on any network unt
 
 ---
 
+## STATUS — updated 2026-08-07 (v0.3.0 released)
+
+Progress against this plan after ~84 loop iterations. Full detail in `teslapi_work_log.md`.
+
+**Primary goal — music AND video sync reliable — DONE, hardware-verified on joulesusb.**
+- Music sync: root cause was an orphaned "running" job (May-8) pinning the dashboard on "syncing" for 3 months + a stale index predating a 2026-04-21 share reorg. Fixed (startup reconciliation + re-index). Real albums verified landing on the drive.
+- Video: dashcam auto-archive (write) verified running; archived-clip playback (read/H2) now streams from the NAS — all 23k clips watchable.
+
+**Phase status:**
+- Phase 0 (sync resilience) — DONE ✓ (mount-safety, stall/retry, exit-code policy, reconciliation; unit + hardware verified)
+- Phase 1 (security) — auth DONE ✓ (login gate + session cookies + Settings control); injection/traversal/OTA-gate/setup-masking verified + tested; 127.0.0.1 bind DONE. **Deferred (supervised):** 1f detached update restart (self-kills health-check/rollback), 1a root-drop/sudo-helper privilege separation.
+- Phase 2 (gadget & fs integrity) — DONE ✓ (2a disable fail-loud, 2b toggle scripts, 2c dashcam layout, 2d/2e/2f/2g)
+- Phase 4 (API contract drift) — backend items DONE ✓ (H3, M-F5, C9, SOL-019, H2) + contract-drift regression guard. Frontend request/response shapes verified snake_case-correct.
+- Phase 5 (truthful status) — DONE ✓
+- Phase 3 (provisioning) — NOT done; needs a fresh SD-card boot to validate (deploy-onto-working-teslausb is the tested path).
+- Phase 6 (UX/visual) — mostly NOT done; needs a browser (nav entry points, wizard race, drive-wipe confirm, mobile layout).
+
+**Tests:** 102 backend + 39 frontend = 141, all green. CI green on main (Node 22). Releases: v0.2.0 (sync/data-safety), v0.3.0 (auth + H2 playback + hardening).
+
+**Remaining = the "Deferred (supervised)" security items above + Phase 3 (fresh hardware) + Phase 6 (browser).** Also pending: music re-index after the user's multi-day share de-dupe (re-index prune verified correct).
+
+---
+
 ## Phase 0 — Before committing the current working-tree diff
 
 The uncommitted `music_sync.py`/`music.py` changes are mostly good (progress2 parsing, mount lock, gadget-enable finally), but have regressions to close first. **[fable]**

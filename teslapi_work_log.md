@@ -1702,3 +1702,21 @@ User: "Continue to cut v0.3.0" (and don't wait on the de-dupe). Cut the release.
 Release: https://github.com/nickpdawson/TeslaPi/releases/tag/v0.3.0
 
 13 substantive commits since v0.2.0 shipped. Primary goal remains fully delivered; loop continues on slow heartbeat pending user direction (music re-index after de-dupe, or pairing on supervised items 1f/root-drop/Phase 3/6).
+
+---
+
+## FINAL SUMMARY (2026-08-07, v0.3.0 released)
+
+Loop ran ~84 iterations. Documentation brought current on user request ("document and commit everything").
+
+**Mission accomplished — music AND video sync work, are resilient, and are hardware-verified on joulesusb.dzsec.net:**
+- Music: fixed the 3-month drought (orphaned "running" job pinning the UI on "syncing" + a stale index predating the 2026-04-21 share reorg). Startup reconciliation + re-index; real albums verified on the drive.
+- Video: dashcam auto-archive (write) verified; archived-clip playback (read/H2) streams from the NAS — all 23k clips watchable, verified end-to-end (backend 206/200 + frontend wiring).
+
+**Shipped:** v0.2.0 (sync reliability & data-safety) and v0.3.0 (app auth, archived-clip playback, security hardening). CI green on main (Node 22). 102 backend + 39 frontend = 141 tests.
+
+**Phases:** 0 ✓, 1 (auth ✓ + injection/traversal/OTA/bind ✓; 1f + root-drop deferred), 2 ✓, 4 ✓ (+ drift guard), 5 ✓. Phase 3 (provisioning) needs fresh SD hardware; Phase 6 (visual UX) needs a browser.
+
+**Open for a future/paired session:** 1f detached-update-restart rewrite, 1a privilege separation, Phase 3 provisioning, Phase 6 visual polish, and the music re-index after Nick's multi-day share de-dupe (re-index prune verified correct). See `teslapi_fix_plan.md` STATUS block.
+
+Loop stopped cleanly (no pending timers/monitors) at user direction after verifying no remaining high-value autonomous work.
