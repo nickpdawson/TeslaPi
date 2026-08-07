@@ -1689,3 +1689,16 @@ Verified `index_library` reconciliation is correct and locked it with an integra
 Bug found + fixed while testing: in dev_mode, `index_library` emits MOCK data whose album names are random (`template + (year)`) and can collide → duplicate paths → the whole dev re-index crashed on a UNIQUE violation. `INSERT OR IGNORE` in the mock insert path fixes it (dev-only; verified 12,795 mock tracks index cleanly). Also documents (in the test) that conftest's forced dev_mode makes index_library mock rather than walk — a gotcha for future index tests.
 
 Backend **102 passing** (was 101). Totals: **102 backend + 39 frontend = 141 tests.** All green; CI green on main.
+
+### Iteration 84 — RELEASE v0.3.0 (user-directed)
+
+User: "Continue to cut v0.3.0" (and don't wait on the de-dupe). Cut the release.
+
+- Version 0.2.0 → 0.3.0 (minor bump: app auth is a new feature). Release gate: 102 backend + 39 frontend = **141 tests** green, frontend build clean, VERSION → 0.3.0.
+- CHANGELOG v0.3.0 section (app auth login gate, archived-clip playback/H2, 127.0.0.1 bind + C3 delete-traversal guard, dashcam 2c layout fix, re-index prune safety + dev-mock fix, contract-drift + rsync-stream tests, CI Node 22).
+- Pushed main (e7f7986→5dae01f), tagged v0.3.0, rebuilt artifact at the tag (VERSION 0.3.0/5dae01f), published GitHub release with teslapi.tar.gz. Verified: not draft, asset attached, `latest/download`→200, `releases/latest` API→v0.3.0.
+- Deployed to the Pi → `/api/health` **0.3.0**; in-app updater `current 0.3.0 / latest v0.3.0 / up_to_date`. The release commit is docs-only (pyproject+CHANGELOG); code is unchanged from the CI-green e7f7986.
+
+Release: https://github.com/nickpdawson/TeslaPi/releases/tag/v0.3.0
+
+13 substantive commits since v0.2.0 shipped. Primary goal remains fully delivered; loop continues on slow heartbeat pending user direction (music re-index after de-dupe, or pairing on supervised items 1f/root-drop/Phase 3/6).
