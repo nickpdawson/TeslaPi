@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.3.0 — App auth, archived-clip playback, security hardening
+
+Builds on v0.2.0 with a login gate, watchable archived dashcam footage, and another
+round of security hardening. All changes are unit-tested and verified on real
+hardware; the whole suite (141 tests) and CI are green.
+
+### Added
+
+- **App authentication (opt-in login gate).** Set a password under **Settings →
+  Security** to require sign-in for the whole app. Hashed storage (pbkdf2), stateless
+  signed session cookies, a login screen, and set/change/disable controls. Dormant
+  until you set a password, so existing installs are unaffected until you opt in.
+- **Archived dashcam clip playback.** Previously every archived event 404'd in the
+  viewer because playback read the cam image (unmounted while the car owns the USB
+  drive). Clips now stream from the NAS archive share (read-only, on demand) with HTTP
+  Range seeking — all archived footage is watchable again.
+
+### Security
+
+- The API now binds to `127.0.0.1` only — nginx is the sole public listener. It was
+  reachable directly on `:8080` from anywhere on the network, bypassing the front door.
+- Locked the local-music delete path against traversal (a crafted `../` path could have
+  deleted the NAS source share); added regression tests.
+
+### Fixed
+
+- Dashcam archive wrote clips to the share root but pre-created a mismatched
+  `TeslaCam/` directory tree — removed the dead path and pinned the layout.
+- Re-indexing the music library now provably prunes files removed from the share and
+  resets changed files for re-sync (so a source reorg/de-dupe indexes cleanly); fixed a
+  dev-mode-only crash in the mock indexer.
+- CI: the frontend job ran on Node 20, too old for the test runner, so it failed to
+  execute; bumped to Node 22.
+
+### Tests
+
+- 102 backend + 39 frontend = **141 tests**, including an API contract-drift guard
+  (frontend paths must resolve to real backend routes) and coverage of the rsync
+  progress/retry accounting.
+
+### Upgrade notes
+
+Your data on `/mutable/teslapi/` persists. See the [Updating section of the
+README](README.md#updating). Nothing changes in behavior until you opt into auth via
+Settings → Security. Same known limitations as v0.2.0 apply for the not-yet-done items
+(provisioning from a bare SD card, OTA restart/rollback, privilege separation).
+
 ## v0.2.0 — Sync reliability & data-safety hardening
 
 This release fixes the root cause of syncs silently stalling, hardens the
