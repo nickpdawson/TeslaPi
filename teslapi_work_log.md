@@ -1720,3 +1720,18 @@ Loop ran ~84 iterations. Documentation brought current on user request ("documen
 **Open for a future/paired session:** 1f detached-update-restart rewrite, 1a privilege separation, Phase 3 provisioning, Phase 6 visual polish, and the music re-index after Nick's multi-day share de-dupe (re-index prune verified correct). See `teslapi_fix_plan.md` STATUS block.
 
 Loop stopped cleanly (no pending timers/monitors) at user direction after verifying no remaining high-value autonomous work.
+
+---
+
+### Iteration 85 — post-de-dupe re-index + hardware sync verification (2026-08-11)
+
+User: "the music library is cleaned up" then "pi is back online". The deferred item (re-index after Nick's multi-day share de-dupe) is now unblocked. Ran it end-to-end and verified on hardware.
+
+**Re-index** (POST `/api/music/library/index`): completed clean, `error:null`. Library went from the stale April-explosion (77,931 tracks / 6,883 albums / 2,115 artists / 2.64 TB) to **14,685 tracks / 1,143 albums / 349 artists / 471 GB** — the duplicate explosion is gone, index now matches the cleaned share. Note: the breadth walk saw 1,983 top-level dirs but only 349 resolve to artists with audio, so ~1,600 top-level dirs hold no directly-indexable audio (likely empty dirs left by the de-dupe) — cosmetic, worth a later glance.
+  - Gotcha re-confirmed: during the walk phase the indexer reports **artist-dir** counts in `total_files`/`indexed_files` (music_index.py:92,101), not tracks; the real track count is only set after the walk (line 167). Don't read mid-walk progress as a file count.
+
+**Sync** (selected mode, one album `/Aqualung/Still Life`, job 26): full safe gadget/mount dance, `completed`, 10/10 files, `bytes_copied == bytes_total == 257,808,340` (exact), `error:null`. `files_copied` momentarily showed 11 mid-run (rsync counting the created dir) then the completion handler pinned it to the real 10 — the overcount fix works live.
+
+**Physical verification** (`/api/music/local`, mounts backing image RO and walks): all 10 FLAC tracks of Aqualung/Still Life present on `music_disk.bin` with correct filenames + sizes summing to 257,808,340. Drive track count 14,683 → 14,693 (+10), proving fresh landing — not just an API "success".
+
+Music sync is confirmed reliable against the cleaned library. No code changes this iteration; docs only.
