@@ -1735,3 +1735,21 @@ User: "the music library is cleaned up" then "pi is back online". The deferred i
 **Physical verification** (`/api/music/local`, mounts backing image RO and walks): all 10 FLAC tracks of Aqualung/Still Life present on `music_disk.bin` with correct filenames + sizes summing to 257,808,340. Drive track count 14,683 → 14,693 (+10), proving fresh landing — not just an API "success".
 
 Music sync is confirmed reliable against the cleaned library. No code changes this iteration; docs only.
+
+---
+
+### Iteration 86 — batched, resumable selective sync (fixes large-sync stall-kill loop) (2026-08-12)
+
+User chose "fix engine first" after we discovered the drive holds the OLD library and the cleaned share is ~471 GB of genuinely different files (see iter 85 follow-up below). A full "Sync New" over that expanded to 33,897 files / 1.12 TB in ONE rsync and never made progress: rsync is silent during its file-list build (`--info=progress2` prints nothing until it transfers), so on a huge `--files-from` the silent scan outran the 90 s stall watchdog → killed → remount → retried → forever, 0 bytes copied (log showed "rsync attempt 42/50" with files_copied=0). Small syncs (the 10-file album) worked because their scan is fast. That's the reliability bug.
+
+**Fix — rsync the selective list in bounded BATCHES instead of one giant `--files-from`:**
+- New `_batch_file_list(file_list, max_files)` (pure, order-preserving fixed chunks; per-file synced bookkeeping makes album boundaries irrelevant to correctness) + `_SYNC_BATCH_FILES = 50`. A 50-file scan finishes far inside the watchdog.
+- New `_sync_file_list_in_batches(job_id, file_list, db_path)` (extracted to module level so it's unit-testable): loops batches, and after each CLEAN batch (rc 0) marks those files `synced=1` + persists cumulative progress — a **checkpoint**, so a sync interrupted by a short window resumes at the next batch instead of restarting. A partial batch (23/24) leaves its files unsynced to retry and the sync continues; a hard batch failure aborts with earlier batches already checkpointed.
+- Threaded `bytes_offset`/`files_offset` through `_supervise_rsync` (now returns run bytes as a 4th tuple element) and `_stream_rsync_progress`, so `files_copied`/`bytes_copied` stay monotonic across batches instead of rewinding to ~0 each batch. Updated `_run_rsync_full` unpack; removed the now-dead `_run_rsync` single-shot wrapper.
+
+**Tests:** new `test_sync_batching.py` (9): `_batch_file_list` sizing/order/empty/clamp; `_stream_rsync_progress` files_offset; and `_sync_file_list_in_batches` — all-succeed (all marked, completed, offsets fed forward [0,1000,2000]/[0,2,4]), partial-middle-batch (left unsynced, sync continues, status partial), hard-fail (aborts, earlier batch checkpointed), empty list, cancel-between-batches. `_supervise_rsync` stubbed — no real rsync/gadget. **Backend 111 passing** (was 102). Full suite green.
+
+Not yet deployed to the Pi / no large transfer run — per the user's "decide content later". The batched path is ready for whatever scope they choose next.
+
+#### (iter 85 follow-up) Drive is stale — the cleaned library is effectively a different library
+While setting up the (aborted) Sync New, dry-run matching of the index against the physical drive (`/api/music/local`) showed the drive still holds the OLD pre-de-dupe explosion (albums like `Kryptonite 29905`, `The Better Life 4040`) — 12,925 tracks / 345 GB, only ~13 files overlapping the cleaned share by (filename, size). Drive uses `01 Title.flac`, cleaned share uses `01 - Title.mp3/flac`. So getting the cleaned library onto the car is a full ~471 GB refresh, not a reconcile — gated on the engine fix above and on a content-scope decision (throughput is ~0.8 MB/s over the CIFS/FAT path, so a full refresh is many hours with the gadget/dashcam disabled). Deferred to the user.

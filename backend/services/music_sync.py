@@ -229,59 +229,16 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
                     await _run_rsync_full(job_id, db_path)
                     # _run_rsync_full sets status=completed itself; nothing more to do
                 else:
-                    # Selective sync: build file list from DB or filesystem
+                    # Selective sync: build the file list, then rsync it in bounded
+                    # BATCHES rather than one giant --files-from. rsync stays silent
+                    # during its file-list build (--info=progress2 emits nothing until
+                    # it transfers), so a large list's scan can exceed the stall
+                    # watchdog and be killed+retried forever with zero progress — the
+                    # failure a full-library "Sync New" hit. Small batches scan fast,
+                    # and each is checkpointed (synced=1 + progress persisted) so an
+                    # interrupted sync resumes at the next batch instead of restarting.
                     file_list = await _build_file_list(paths, mode, db_path)
-
-                    if not file_list:
-                        logger.info("Sync job %d: no files to sync", job_id)
-                        await _update_job(db_path, job_id, status="completed")
-                        return
-
-                    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-                        for path in file_list:
-                            f.write(path.lstrip("/") + "\n")
-                        files_from = f.name
-
-                    try:
-                        rc = await _run_rsync(job_id, files_from, db_path)
-                    finally:
-                        import os
-                        os.unlink(files_from)
-
-                    # Mark synced files in DB only when rsync fully transferred them
-                    # (rc 0). On a partial run (23/24) leave them unsynced so the next
-                    # selective sync retries the gaps instead of skipping them forever.
-                    if rc == 0:
-                        async with aiosqlite.connect(db_path) as db:
-                            for path in file_list:
-                                await db.execute(
-                                    "UPDATE music_files SET synced = 1 WHERE path = ?",
-                                    (path,),
-                                )
-                            await db.commit()
-                        # Pin files_copied to the real transferred-file count. The live
-                        # counter is derived from rsync's to-chk total, which also counts
-                        # the directories rsync creates (e.g. Artist/, Album/), so it can
-                        # overshoot the file count and render >100% in the UI. On full
-                        # success the intended file count is exactly len(file_list).
-                        await _update_job(
-                            db_path, job_id,
-                            status="completed",
-                            files_copied=len(file_list),
-                        )
-                    else:
-                        # Partial transfer (rsync 23/24): some files did not copy.
-                        # Report it honestly as "partial", not "completed", and leave
-                        # those files unsynced so the next sync retries the gaps.
-                        logger.warning(
-                            "Sync job %d: rsync exit %s — partial transfer, files left for retry",
-                            job_id, rc,
-                        )
-                        await _update_job(
-                            db_path, job_id,
-                            status="partial",
-                            error_message=f"Some files could not be copied (rsync code {rc}); they will retry on the next sync.",
-                        )
+                    await _sync_file_list_in_batches(job_id, file_list, db_path)
 
             finally:
                 # Step 7: Unmount source share and RELEASE the music image. We always
@@ -471,6 +428,129 @@ _RETRY_BACKOFF_SEC = 5.0       # wait between rsync restart attempts
 _MAX_RSYNC_RESTARTS = 50       # cap retries so a truly broken state doesn't loop forever
 _SHARE_WAIT_TIMEOUT_SEC = 3600 # how long we'll wait for the source share to come back
 
+# A selective sync rsyncs its file list in batches of this many files rather than one
+# giant --files-from. rsync is SILENT during its file-list build (--info=progress2
+# prints nothing until it transfers), so a huge list's scan can exceed the stall
+# watchdog and be killed+retried forever with zero progress — the exact failure a
+# full-library "Sync New" hit. A small batch's scan finishes in well under the
+# watchdog, and each completed batch is checkpointed (synced=1 + progress persisted)
+# so an interrupted sync resumes instead of restarting. Kept modest so checkpoints
+# are frequent over the slow CIFS/FAT write path.
+_SYNC_BATCH_FILES = 50
+
+
+def _batch_file_list(file_list: list[str], max_files: int = _SYNC_BATCH_FILES) -> list[list[str]]:
+    """Split an ordered file list into consecutive batches of at most ``max_files``.
+
+    Order is preserved, so batches stay artist/album-contiguous (the DB hands paths
+    back grouped) — good for rsync locality — while the fixed cap bounds each rsync's
+    file-list scan so it can't recreate the giant-enumeration stall. Per-file synced
+    bookkeeping makes album boundaries irrelevant to correctness, so a plain fixed
+    chunk is both simplest and safe.
+    """
+    if max_files < 1:
+        max_files = 1
+    return [file_list[i:i + max_files] for i in range(0, len(file_list), max_files)]
+
+
+async def _sync_file_list_in_batches(job_id: int, file_list: list[str], db_path: str) -> None:
+    """rsync ``file_list`` to the music image in bounded batches, checkpointing each.
+
+    Each batch is a small ``--files-from`` so rsync's (silent) file-list scan stays
+    well under the stall watchdog. After a clean batch its files are marked synced=1
+    and cumulative progress is persisted, so a sync interrupted by a short window
+    resumes at the next batch instead of restarting. A partial batch (rsync 23/24)
+    leaves its files unsynced to retry next time and the sync continues; a hard batch
+    failure (supervisor exhausted its own retries) aborts, with completed batches
+    already checkpointed. Sets the job's terminal status (completed/partial).
+
+    Must be called with the music image mounted and the gadget disabled (the caller's
+    responsibility); it does not touch the mount/gadget lifecycle.
+    """
+    if not file_list:
+        logger.info("Sync job %d: no files to sync", job_id)
+        await _update_job(db_path, job_id, status="completed")
+        return
+
+    batches = _batch_file_list(file_list, _SYNC_BATCH_FILES)
+    logger.info(
+        "Sync job %d: %d files in %d batch(es) of <=%d",
+        job_id, len(file_list), len(batches), _SYNC_BATCH_FILES,
+    )
+
+    copied_files = 0    # files in fully-transferred batches (authoritative count)
+    copied_bytes = 0    # bytes transferred so far, for a monotonic UI total
+    any_partial = False
+
+    for batch_idx, batch in enumerate(batches, 1):
+        if _active_sync["cancelled"]:
+            raise asyncio.CancelledError()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            for path in batch:
+                f.write(path.lstrip("/") + "\n")
+            files_from = f.name
+
+        try:
+            success, rc, err, run_bytes = await _supervise_rsync(
+                job_id, db_path, [f"--files-from={files_from}"],
+                bytes_offset=copied_bytes,
+                files_offset=copied_files,
+            )
+        finally:
+            os.unlink(files_from)
+
+        # Count bytes transferred regardless of exit so the UI total never rewinds
+        # between batches.
+        copied_bytes += run_bytes
+
+        if success:
+            # Checkpoint: mark this batch synced and persist cumulative progress.
+            # Marking happens ONLY on a clean batch (rc 0), so a partial/failed batch
+            # leaves its files unsynced for the next sync to retry.
+            async with aiosqlite.connect(db_path) as db:
+                for path in batch:
+                    await db.execute(
+                        "UPDATE music_files SET synced = 1 WHERE path = ?",
+                        (path,),
+                    )
+                await db.commit()
+            copied_files += len(batch)
+            await _update_job(
+                db_path, job_id,
+                files_copied=copied_files,
+                bytes_copied=copied_bytes,
+            )
+        elif rc in (23, 24):
+            # Partial batch (vanished/unreadable files). Leave these unsynced so the
+            # next sync retries the gaps; keep going with the remaining batches.
+            any_partial = True
+            logger.warning(
+                "Sync job %d: batch %d/%d partial (rsync %s)",
+                job_id, batch_idx, len(batches), rc,
+            )
+        else:
+            # Hard failure after the supervisor exhausted its own retries — the
+            # share/link is likely down. Abort; completed batches are already
+            # checkpointed (synced=1), so a re-run resumes from here.
+            raise RuntimeError(
+                f"rsync failed on batch {batch_idx}/{len(batches)}: {err}"
+            )
+
+    if any_partial:
+        # files_copied already reflects only the fully-transferred batches.
+        await _update_job(
+            db_path, job_id,
+            status="partial",
+            error_message="Some files could not be copied; they will retry on the next sync.",
+        )
+    else:
+        await _update_job(
+            db_path, job_id,
+            status="completed",
+            files_copied=copied_files,
+        )
+
 
 class _RsyncStalled(Exception):
     """Raised when rsync produces no stdout for too long — pipeline likely wedged."""
@@ -482,6 +562,7 @@ async def _stream_rsync_progress(
     job_id: int,
     *,
     bytes_offset: int = 0,
+    files_offset: int = 0,
     stall_timeout: float = _STALL_TIMEOUT_SEC,
     progress: dict | None = None,
 ) -> tuple[int, int]:
@@ -493,6 +574,9 @@ async def _stream_rsync_progress(
     ``bytes_offset`` is the cumulative bytes transferred by PRIOR rsync runs; it is
     added to this run's byte count only for the DB write, so the UI total stays
     monotonic across restarts. The returned/holder byte count is THIS run only.
+    ``files_offset`` does the same for the file counter — the count of files copied
+    by prior runs/batches — so files_copied stays monotonic when a large sync is
+    rsynced in several batches.
 
     ``progress`` (if given) is updated in place with ``{"run_bytes", "files"}`` on
     every parse and before raising ``_RsyncStalled`` — the supervisor reads it to
@@ -543,7 +627,7 @@ async def _stream_rsync_progress(
         if now - last_update >= 1.0:
             await _update_job(
                 db_path, job_id,
-                files_copied=last_files,
+                files_copied=files_offset + last_files,
                 bytes_copied=bytes_offset + run_bytes,
             )
             last_update = now
@@ -552,7 +636,7 @@ async def _stream_rsync_progress(
     _publish()
     await _update_job(
         db_path, job_id,
-        files_copied=last_files,
+        files_copied=files_offset + last_files,
         bytes_copied=bytes_offset + run_bytes,
     )
     return last_files, run_bytes
@@ -680,7 +764,14 @@ def _classify_rsync_exit(rc: int | None) -> str:
     return "retry"
 
 
-async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> tuple[bool, int | None, str]:
+async def _supervise_rsync(
+    job_id: int,
+    db_path: str,
+    extra_args: list[str],
+    *,
+    bytes_offset: int = 0,
+    files_offset: int = 0,
+) -> tuple[bool, int | None, str, int]:
     """Run rsync with stall-detection, concurrent stderr draining, auto-resume on
     share outage, and monotonic cumulative byte accounting.
 
@@ -688,9 +779,16 @@ async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> 
     On a stall (no stdout for _STALL_TIMEOUT_SEC) or a retryable non-success exit,
     rsync is killed, the share is re-checked/remounted, and rsync is restarted;
     ``rsync -a`` skips already-correct files cheaply, so this is robust to repeated
-    WiFi drops. Returns ``(success, final_rc, error)`` where ``success`` is True only
-    on exit code 0. Partial codes (23/24) return ``(False, rc, error)`` without
-    endless retries so the caller decides how to record them. Propagates
+    WiFi drops.
+
+    ``bytes_offset``/``files_offset`` are the cumulative bytes/files transferred by
+    PRIOR batches; they're added to the live DB progress writes so a multi-batch sync
+    reports a monotonic running total (this call's own runs still start from 0).
+
+    Returns ``(success, final_rc, error, run_bytes)`` where ``success`` is True only
+    on exit code 0 and ``run_bytes`` is the bytes THIS call transferred (summed across
+    its internal retries). Partial codes (23/24) return ``(False, rc, error, run_bytes)``
+    without endless retries so the caller decides how to record them. Propagates
     ``asyncio.CancelledError`` on user cancel.
     """
     import os
@@ -741,7 +839,8 @@ async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> 
             try:
                 await _stream_rsync_progress(
                     proc, db_path, job_id,
-                    bytes_offset=cumulative_bytes,
+                    bytes_offset=bytes_offset + cumulative_bytes,
+                    files_offset=files_offset,
                     progress=progress,
                 )
             except _RsyncStalled as exc:
@@ -782,12 +881,12 @@ async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> 
         kind = _classify_rsync_exit(rc)
         if kind == "success":
             logger.info("Sync job %d: rsync completed on attempt %d", job_id, attempt)
-            return True, rc, ""
+            return True, rc, "", cumulative_bytes
         if kind == "partial":
             # Partial transfer (vanished/unreadable files). Not retried forever —
             # hand back to the caller to record; a later sync retries the gaps.
             logger.warning("Sync job %d: rsync partial (code %d): %s", job_id, rc, stderr_text[:200])
-            return False, rc, stderr_text[:200]
+            return False, rc, stderr_text[:200], cumulative_bytes
 
         last_error = f"exit {rc}: {stderr_text[:200]}"
         logger.warning("Sync job %d: rsync exit %d on attempt %d, will retry: %s",
@@ -798,7 +897,7 @@ async def _supervise_rsync(job_id: int, db_path: str, extra_args: list[str]) -> 
             await _remount_music_share()
 
     logger.error("Sync job %d: gave up after %d attempts: %s", job_id, _MAX_RSYNC_RESTARTS, last_error)
-    return False, last_rc, f"failed after {_MAX_RSYNC_RESTARTS} attempts: {last_error[:200]}"
+    return False, last_rc, f"failed after {_MAX_RSYNC_RESTARTS} attempts: {last_error[:200]}", cumulative_bytes
 
 
 def _path_mount_state(path: str) -> bool | None:
@@ -915,7 +1014,7 @@ async def _ensure_image_unmounted(log_ctx: str = "image release", retries: int =
 
 async def _run_rsync_full(job_id: int, db_path: str) -> None:
     """Full rsync of the entire share via the supervised runner."""
-    success, rc, err = await _supervise_rsync(job_id, db_path, [])
+    success, rc, err, _run_bytes = await _supervise_rsync(job_id, db_path, [])
     if success:
         logger.info("Sync job %d: full rsync completed", job_id)
         # Deliberately do NOT bulk-mark synced here. Marking based on a filesystem
@@ -938,16 +1037,6 @@ async def _run_rsync_full(job_id: int, db_path: str) -> None:
         )
         return
     await _update_job(db_path, job_id, status="failed", error_message=err)
-
-
-async def _run_rsync(job_id: int, files_from: str, db_path: str) -> int:
-    """Selective rsync via the supervised runner. Returns the final rsync exit code;
-    raises RuntimeError on a hard (non-partial) failure so the caller marks the job
-    failed. rc 0 = fully transferred; 23/24 = partial (some files left for retry)."""
-    success, rc, err = await _supervise_rsync(job_id, db_path, [f"--files-from={files_from}"])
-    if not success and rc not in (23, 24):
-        raise RuntimeError(f"rsync failed: {err}")
-    return rc if rc is not None else 0
 
 
 async def get_sync_status(db_path: str, job_id: int | None = None) -> dict | None:
