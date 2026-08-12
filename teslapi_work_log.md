@@ -1762,3 +1762,6 @@ Deployed to joulesusb.dzsec.net (Pi 4) and validated with a bounded 4-album sele
 - Corrected throughput: steady ~4.7 MB/s (not the 0.8 MB/s the stall-degraded first sync implied). Revises a hypothetical full 471 GB refresh to ~30-35 h (still long + dashcam-off; content scope remains the user's call).
 
 Engine fix DONE + deployed + hardware-verified. Large/batched selective syncs are now reliable and resumable.
+
+#### (iter 86) Full-refresh sync in progress — progress note 1 (2026-08-12 ~16:45)
+User chose "full refresh": pushing the entire cleaned library onto the car via the batched Sync New (job 29). Additive/non-destructive (drive has room), resumable, dashcam off while syncing. Started 14:12; log confirmed batched path: "33831 files in 677 batch(es) of <=50", every batch "completed on attempt 1" (NO stall-retry loop — the fix holds under sustained load). Progress samples (synced=1 track count / bytes): 14:40→374/7.6GB, 15:20→780/17.4GB, 16:05→1306/25.8GB, 16:45→1791/36GB. Steady ~4MB/s; ~12,894 tracks (~17-19h) remaining. Monitoring on a ~40min cadence with auto-resume if the car sleeps interrupts it. DESTRUCTIVE old-junk cleanup (~345GB pre-de-dupe explosion still on the drive) deferred until after completion + user confirm.
