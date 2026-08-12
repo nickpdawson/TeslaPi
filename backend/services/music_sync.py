@@ -1,6 +1,7 @@
 """Selective music sync engine — rsync with gadget lifecycle management."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -36,6 +37,26 @@ SHARE_MOUNT = "/mnt/music_share"
 MUSIC_IMAGE = "/backingfiles/music_disk.bin"
 GADGET_ENABLE = "/opt/teslapi/deploy/teslapi-gadget-enable.sh"
 GADGET_DISABLE = "/opt/teslapi/deploy/teslapi-gadget-disable.sh"
+
+# SQLite busy timeout for every sync DB connection. During a sync the DB is written
+# ~1 Hz (progress) plus a checkpoint per batch WHILE rsync hammers the same SD card
+# writing the music image — a DB write can be I/O-starved well past SQLite's 5 s
+# default lock timeout and throw "database is locked", which killed a multi-hour full
+# sync mid-flight (and the abnormal exit then left a stale loop device that blocked
+# the image release and dropped the USB gadget). 30 s absorbs those stalls.
+_DB_BUSY_TIMEOUT_SEC = 30.0
+
+
+@contextlib.asynccontextmanager
+async def _connect(db_path: str):
+    """Open the sync DB with a generous busy timeout + WAL. Use for every connection
+    in the sync path so a transient lock waits instead of failing the whole sync.
+    Use as ``async with _connect(db_path) as db:``.
+    """
+    async with aiosqlite.connect(db_path, timeout=_DB_BUSY_TIMEOUT_SEC) as db:
+        await db.execute(f"PRAGMA busy_timeout={int(_DB_BUSY_TIMEOUT_SEC * 1000)}")
+        await db.execute("PRAGMA journal_mode=WAL")
+        yield db
 
 
 async def start_sync(
@@ -77,7 +98,7 @@ async def start_sync(
     # install, so a blanket refusal would disable music sync everywhere.
 
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with _connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 
@@ -288,7 +309,7 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
 
 async def _run_sync_dev(job_id: int, paths: list[str], mode: str, db_path: str) -> None:
     """Simulate sync with progress updates in dev mode."""
-    async with aiosqlite.connect(db_path) as db:
+    async with _connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
         # Get total files for the paths
@@ -360,7 +381,7 @@ async def _build_file_list(paths: list[str], mode: str, db_path: str) -> list[st
     import os
 
     # Try DB first
-    async with aiosqlite.connect(db_path) as db:
+    async with _connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
         file_list = []
@@ -508,7 +529,7 @@ async def _sync_file_list_in_batches(job_id: int, file_list: list[str], db_path:
             # Checkpoint: mark this batch synced and persist cumulative progress.
             # Marking happens ONLY on a clean batch (rc 0), so a partial/failed batch
             # leaves its files unsynced for the next sync to retry.
-            async with aiosqlite.connect(db_path) as db:
+            async with _connect(db_path) as db:
                 for path in batch:
                     await db.execute(
                         "UPDATE music_files SET synced = 1 WHERE path = ?",
@@ -1041,7 +1062,7 @@ async def _run_rsync_full(job_id: int, db_path: str) -> None:
 
 async def get_sync_status(db_path: str, job_id: int | None = None) -> dict | None:
     """Get current/latest sync job status."""
-    async with aiosqlite.connect(db_path) as db:
+    async with _connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -1062,7 +1083,7 @@ async def get_sync_status(db_path: str, job_id: int | None = None) -> dict | Non
 
 async def get_sync_history(db_path: str, limit: int = 20) -> list[dict]:
     """Get past sync jobs."""
-    async with aiosqlite.connect(db_path) as db:
+    async with _connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -1120,8 +1141,7 @@ async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
 
     values.append(job_id)
 
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
+    async with _connect(db_path) as db:
         await db.execute(
             f"UPDATE music_sync_jobs SET {', '.join(set_clauses)} WHERE id = ?",
             values,

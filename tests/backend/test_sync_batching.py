@@ -82,6 +82,27 @@ def _patch_supervise(monkeypatch, script):
     return calls
 
 
+# --- _connect busy timeout ---------------------------------------------------
+
+def test_connect_sets_generous_busy_timeout(db_path):
+    # A sync writes the DB while rsync hammers the same SD card; the default 5s
+    # SQLite lock timeout let a starved write throw "database is locked" and kill a
+    # multi-hour sync. _connect must raise the busy timeout well above that.
+    _init(db_path)
+
+    async def go():
+        async with ms._connect(db_path) as db:
+            cur = await db.execute("PRAGMA busy_timeout")
+            bt = (await cur.fetchone())[0]
+            cur = await db.execute("PRAGMA journal_mode")
+            jm = (await cur.fetchone())[0]
+            return bt, jm
+
+    busy_timeout, journal_mode = _run(go())
+    assert busy_timeout == 30000
+    assert journal_mode.lower() == "wal"
+
+
 # --- _batch_file_list --------------------------------------------------------
 
 def test_batch_sizes_order_and_completeness():
