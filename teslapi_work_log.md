@@ -1753,3 +1753,12 @@ Not yet deployed to the Pi / no large transfer run — per the user's "decide co
 
 #### (iter 85 follow-up) Drive is stale — the cleaned library is effectively a different library
 While setting up the (aborted) Sync New, dry-run matching of the index against the physical drive (`/api/music/local`) showed the drive still holds the OLD pre-de-dupe explosion (albums like `Kryptonite 29905`, `The Better Life 4040`) — 12,925 tracks / 345 GB, only ~13 files overlapping the cleaned share by (filename, size). Drive uses `01 Title.flac`, cleaned share uses `01 - Title.mp3/flac`. So getting the cleaned library onto the car is a full ~471 GB refresh, not a reconcile — gated on the engine fix above and on a content-scope decision (throughput is ~0.8 MB/s over the CIFS/FAT path, so a full refresh is many hours with the gadget/dashcam disabled). Deferred to the user.
+
+#### (iter 86) Hardware validation of the batched sync — PASSED
+Deployed to joulesusb.dzsec.net (Pi 4) and validated with a bounded 4-album selective sync (job 28, 66 files / 2.83 GB — Bob Dylan/New Morning, Billy Joel/River of Dreams, Ben Folds/So There, Bruce Springsteen Apollo 2012):
+- Log confirmed batching: "66 files in 2 batch(es) of <=50"; single "rsync attempt 1/50" — NO stall-kill loop.
+- Checkpoint proven live: `synced=1` total jumped 12→62 mid-job when batch 1 (50 files) completed, then 62→78 at batch 2 completion. A restart mid-sync would resume at batch 2, not re-copy batch 1.
+- Completed byte-exact (2,831 MB == bytes_total), status completed, no errors. Gadget re-enabled (UDC bound → dashcam recording back). All 4 albums physically present on the drive with correct track counts (19+10+12+25=66); drive total 14,693→14,759.
+- Corrected throughput: steady ~4.7 MB/s (not the 0.8 MB/s the stall-degraded first sync implied). Revises a hypothetical full 471 GB refresh to ~30-35 h (still long + dashcam-off; content scope remains the user's call).
+
+Engine fix DONE + deployed + hardware-verified. Large/batched selective syncs are now reliable and resumable.
