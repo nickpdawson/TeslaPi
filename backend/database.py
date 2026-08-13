@@ -11,6 +11,29 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Busy timeout applied to every DB connection opened via connect(). A music sync
+# writes this DB (progress + checkpoints) while rsync saturates the same SD card, so
+# a write can be I/O-starved past SQLite's 5s default lock timeout and throw
+# "database is locked". 30s absorbs those stalls. Applied app-wide (not just the sync
+# path) so no other subsystem holding a lock can starve the sync either.
+DB_BUSY_TIMEOUT_SEC = 30.0
+
+
+@asynccontextmanager
+async def connect(db_path: str | None = None) -> "AsyncGenerator[aiosqlite.Connection, None]":
+    """Open the app DB with a generous busy timeout + WAL. Use everywhere:
+    ``async with connect() as db:`` (defaults to settings.database_path).
+
+    Centralizes the busy_timeout/WAL pragmas so a transient lock waits instead of
+    throwing — the failure that repeatedly killed the full-library music sync.
+    """
+    path = db_path if db_path is not None else str(settings.database_path)
+    async with aiosqlite.connect(path, timeout=DB_BUSY_TIMEOUT_SEC) as db:
+        await db.execute(f"PRAGMA busy_timeout={int(DB_BUSY_TIMEOUT_SEC * 1000)}")
+        await db.execute("PRAGMA journal_mode=WAL")
+        yield db
+
+
 _MIGRATIONS = [
     # music_files: indexed library of tracks from the network share
     """

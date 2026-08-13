@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend import database
 from backend.services import music_index, music_sync, share_browser
 
 logger = logging.getLogger(__name__)
@@ -734,7 +735,7 @@ async def start_new_sync() -> dict:
     try:
         import aiosqlite
         newer_paths = []
-        async with aiosqlite.connect(settings.database_path) as db:
+        async with database.connect(settings.database_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT DISTINCT '/' || artist || '/' || album as path "

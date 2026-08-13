@@ -7,6 +7,7 @@ import aiosqlite
 from fastapi import APIRouter
 
 from backend.config import settings
+from backend import database
 from backend.models.schemas import (
     ArchiveStatus,
     DashcamEvent,
@@ -344,7 +345,7 @@ async def _read_music_status() -> MusicSyncStatus:
     music = MusicSyncStatus()
 
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with database.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 
@@ -392,7 +393,7 @@ async def _read_dashcam_events() -> list[DashcamEvent]:
     events: list[DashcamEvent] = []
 
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with database.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 

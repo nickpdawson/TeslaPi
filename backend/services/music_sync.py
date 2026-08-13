@@ -38,25 +38,55 @@ MUSIC_IMAGE = "/backingfiles/music_disk.bin"
 GADGET_ENABLE = "/opt/teslapi/deploy/teslapi-gadget-enable.sh"
 GADGET_DISABLE = "/opt/teslapi/deploy/teslapi-gadget-disable.sh"
 
-# SQLite busy timeout for every sync DB connection. During a sync the DB is written
-# ~1 Hz (progress) plus a checkpoint per batch WHILE rsync hammers the same SD card
-# writing the music image — a DB write can be I/O-starved well past SQLite's 5 s
-# default lock timeout and throw "database is locked", which killed a multi-hour full
-# sync mid-flight (and the abnormal exit then left a stale loop device that blocked
-# the image release and dropped the USB gadget). 30 s absorbs those stalls.
-_DB_BUSY_TIMEOUT_SEC = 30.0
-
+# Extra retries for sync DB writes when a lock persists beyond the connection's 30s
+# busy timeout (severe SD I/O contention during a large sync). Belt-and-suspenders on
+# top of the busy timeout so a terminal-status or checkpoint write is never fatal.
+_DB_WRITE_RETRIES = 6
+_DB_WRITE_RETRY_DELAY_SEC = 0.75
 
 @contextlib.asynccontextmanager
 async def _connect(db_path: str):
-    """Open the sync DB with a generous busy timeout + WAL. Use for every connection
-    in the sync path so a transient lock waits instead of failing the whole sync.
-    Use as ``async with _connect(db_path) as db:``.
+    """Open the sync DB with the app-wide busy timeout + WAL. Delegates to the shared
+    ``database.connect`` so every subsystem (sync, auto_sync, dashcam, status, index)
+    uses the SAME generous busy timeout — a transient lock then waits instead of
+    failing. Use as ``async with _connect(db_path) as db:``.
     """
-    async with aiosqlite.connect(db_path, timeout=_DB_BUSY_TIMEOUT_SEC) as db:
-        await db.execute(f"PRAGMA busy_timeout={int(_DB_BUSY_TIMEOUT_SEC * 1000)}")
-        await db.execute("PRAGMA journal_mode=WAL")
+    from backend.database import connect as _db_connect
+    async with _db_connect(db_path) as db:
         yield db
+
+
+async def _update_job_progress(db_path: str, job_id: int, **kwargs) -> None:
+    """Best-effort progress write. The ~1 Hz files_copied/bytes_copied updates are
+    cosmetic UI data; a lock (or any error) on one must NOT propagate and kill the
+    transfer — that was the failure that repeatedly aborted the full-library sync.
+    Swallow and log; the next update (or the terminal status write) will catch up.
+    """
+    try:
+        await _update_job(db_path, job_id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — progress is cosmetic; never fatal
+        logger.debug("Sync job %s: progress update skipped (non-fatal): %s", job_id, exc)
+
+
+async def _mark_batch_synced(db_path: str, batch: list[str]) -> None:
+    """Mark a completed batch's files synced=1, retrying on a transient lock. A raised
+    lock here would abort the whole sync (the files would re-copy next run), so absorb
+    momentary "database is locked" the same way _update_job does."""
+    for attempt in range(_DB_WRITE_RETRIES):
+        try:
+            async with _connect(db_path) as db:
+                for path in batch:
+                    await db.execute(
+                        "UPDATE music_files SET synced = 1 WHERE path = ?",
+                        (path,),
+                    )
+                await db.commit()
+            return
+        except Exception as exc:  # aiosqlite raises sqlite3.OperationalError
+            if "locked" in str(exc).lower() and attempt < _DB_WRITE_RETRIES - 1:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                continue
+            raise
 
 
 async def start_sync(
@@ -529,13 +559,7 @@ async def _sync_file_list_in_batches(job_id: int, file_list: list[str], db_path:
             # Checkpoint: mark this batch synced and persist cumulative progress.
             # Marking happens ONLY on a clean batch (rc 0), so a partial/failed batch
             # leaves its files unsynced for the next sync to retry.
-            async with _connect(db_path) as db:
-                for path in batch:
-                    await db.execute(
-                        "UPDATE music_files SET synced = 1 WHERE path = ?",
-                        (path,),
-                    )
-                await db.commit()
+            await _mark_batch_synced(db_path, batch)
             copied_files += len(batch)
             await _update_job(
                 db_path, job_id,
@@ -646,16 +670,17 @@ async def _stream_rsync_progress(
         _publish()
         now = time.monotonic()
         if now - last_update >= 1.0:
-            await _update_job(
+            # Best-effort: a locked progress write must not kill the transfer.
+            await _update_job_progress(
                 db_path, job_id,
                 files_copied=files_offset + last_files,
                 bytes_copied=bytes_offset + run_bytes,
             )
             last_update = now
 
-    # Flush final progress
+    # Flush final progress (best-effort; cosmetic)
     _publish()
-    await _update_job(
+    await _update_job_progress(
         db_path, job_id,
         files_copied=files_offset + last_files,
         bytes_copied=bytes_offset + run_bytes,
@@ -1141,9 +1166,19 @@ async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
 
     values.append(job_id)
 
-    async with _connect(db_path) as db:
-        await db.execute(
-            f"UPDATE music_sync_jobs SET {', '.join(set_clauses)} WHERE id = ?",
-            values,
-        )
-        await db.commit()
+    sql = f"UPDATE music_sync_jobs SET {', '.join(set_clauses)} WHERE id = ?"
+    # Retry on a transient lock beyond the connection busy timeout. This runs during
+    # a sync while rsync saturates the SD card, so terminal-status and checkpoint
+    # writes must not fail on a momentary "database is locked" — that recurring
+    # failure is what aborted the full-library sync even with a 30s busy timeout.
+    for attempt in range(_DB_WRITE_RETRIES):
+        try:
+            async with _connect(db_path) as db:
+                await db.execute(sql, values)
+                await db.commit()
+            return
+        except Exception as exc:  # aiosqlite raises sqlite3.OperationalError
+            if "locked" in str(exc).lower() and attempt < _DB_WRITE_RETRIES - 1:
+                await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SEC * (attempt + 1))
+                continue
+            raise

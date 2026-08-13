@@ -10,12 +10,31 @@ and the monotonic cumulative accounting — without running a real rsync or the 
 lifecycle (``_supervise_rsync`` is stubbed).
 """
 import asyncio
+import contextlib
 import sqlite3
 
 import pytest
 
+from backend import database
 from backend.database import init_db
 from backend.services import music_sync as ms
+
+
+def _flaky_connect(fail_first, state):
+    """An async-CM _connect replacement that raises 'database is locked' for the first
+    ``fail_first`` uses, then delegates to the real connect. Simulates transient SD
+    contention so the retry paths can be exercised without a real lock."""
+    real = ms._connect
+
+    @contextlib.asynccontextmanager
+    async def flaky(db_path):
+        state["n"] += 1
+        if state["n"] <= fail_first:
+            raise sqlite3.OperationalError("database is locked")
+        async with real(db_path) as db:
+            yield db
+
+    return flaky
 
 
 def _run(coro):
@@ -101,6 +120,72 @@ def test_connect_sets_generous_busy_timeout(db_path):
     busy_timeout, journal_mode = _run(go())
     assert busy_timeout == 30000
     assert journal_mode.lower() == "wal"
+
+
+# --- lock resilience (the fix for the recurring 'database is locked' abort) ------
+
+def test_database_connect_sets_busy_timeout(db_path):
+    _init(db_path)
+
+    async def go():
+        async with database.connect(db_path) as db:
+            bt = (await (await db.execute("PRAGMA busy_timeout")).fetchone())[0]
+            jm = (await (await db.execute("PRAGMA journal_mode")).fetchone())[0]
+            return bt, jm
+
+    bt, jm = _run(go())
+    assert bt == 30000
+    assert jm.lower() == "wal"
+
+
+def test_update_job_progress_swallows_lock(monkeypatch):
+    # A locked cosmetic progress write must NOT propagate (that killed the full sync).
+    async def boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ms, "_update_job", boom)
+    # Must not raise:
+    _run(ms._update_job_progress("db", 1, files_copied=5, bytes_copied=100))
+
+
+def test_update_job_retries_transient_lock_then_succeeds(db_path, monkeypatch):
+    _init(db_path)
+    jid = _new_job(db_path)
+    monkeypatch.setattr(ms, "_DB_WRITE_RETRY_DELAY_SEC", 0)
+    state = {"n": 0}
+    monkeypatch.setattr(ms, "_connect", _flaky_connect(2, state))  # 2 locks, then ok
+
+    _run(ms._update_job(db_path, jid, status="completed"))
+
+    assert state["n"] == 3  # retried past the two locks
+    assert _job(db_path, jid)["status"] == "completed"
+
+
+def test_update_job_gives_up_after_retries(db_path, monkeypatch):
+    _init(db_path)
+    jid = _new_job(db_path)
+    monkeypatch.setattr(ms, "_DB_WRITE_RETRY_DELAY_SEC", 0)
+    state = {"n": 0}
+    # Lock forever → the terminal write eventually raises (caller decides; for a
+    # progress write _update_job_progress would swallow it).
+    monkeypatch.setattr(ms, "_connect", _flaky_connect(999, state))
+    with pytest.raises(sqlite3.OperationalError):
+        _run(ms._update_job(db_path, jid, status="completed"))
+    assert state["n"] == ms._DB_WRITE_RETRIES
+
+
+def test_mark_batch_synced_retries_transient_lock(db_path, monkeypatch):
+    _init(db_path)
+    paths = ["/a/b/1.mp3", "/a/b/2.mp3"]
+    _seed(db_path, paths)
+    monkeypatch.setattr(ms, "_DB_WRITE_RETRY_DELAY_SEC", 0)
+    state = {"n": 0}
+    monkeypatch.setattr(ms, "_connect", _flaky_connect(1, state))  # 1 lock, then ok
+
+    _run(ms._mark_batch_synced(db_path, paths))
+
+    assert state["n"] == 2
+    assert _synced(db_path) == set(paths)
 
 
 # --- _batch_file_list --------------------------------------------------------

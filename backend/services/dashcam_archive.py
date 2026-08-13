@@ -10,6 +10,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from backend import database
 from backend.config import settings
 from backend.services import script_runner
 from backend.services import share_browser
@@ -108,7 +109,7 @@ async def start_archive(
 
     db_path = str(settings.database_path)
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with database.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 
@@ -274,7 +275,7 @@ async def _run_archive(job_id: int, delete_after: bool) -> None:
                     bytes_copied += clip["size_bytes"]
 
                     # Record in DB (only verified copies)
-                    async with aiosqlite.connect(db_path) as db:
+                    async with database.connect(db_path) as db:
                         await db.execute("PRAGMA journal_mode=WAL")
                         await db.execute(
                             """INSERT OR IGNORE INTO dashcam_archived_clips
@@ -411,7 +412,7 @@ async def _discover_unarchived(db_path: str) -> list[dict]:
                     continue
 
                 # Check if already archived
-                async with aiosqlite.connect(db_path) as db:
+                async with database.connect(db_path) as db:
                     db.row_factory = aiosqlite.Row
                     await db.execute("PRAGMA journal_mode=WAL")
                     async with db.execute(
@@ -465,7 +466,7 @@ async def get_archive_status() -> dict:
         else:
             result["server_reachable"] = True
 
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -492,7 +493,7 @@ async def get_archive_status() -> dict:
 async def get_archive_history(limit: int = 20) -> list[dict]:
     """Get past archive jobs."""
     db_path = str(settings.database_path)
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -514,7 +515,7 @@ async def get_archived_clips(
 ) -> dict:
     """Get archived clips with optional filtering and pagination."""
     db_path = str(settings.database_path)
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -592,7 +593,7 @@ async def _update_job(db_path: str, job_id: int, **kwargs) -> None:
 
     values.append(job_id)
 
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(
             f"UPDATE dashcam_archive_jobs SET {', '.join(set_clauses)} WHERE id = ?",

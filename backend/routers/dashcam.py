@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend import database
 from backend.services import share_browser, dashcam_archive
 
 logger = logging.getLogger(__name__)
@@ -330,7 +331,7 @@ async def _get_event_detail_from_db(event_id: str) -> EventDetailResponse | None
 
     rows: list[dict] = []
     try:
-        async with aiosqlite.connect(str(settings.database_path)) as db:
+        async with database.connect(str(settings.database_path)) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
             async with db.execute(
@@ -402,7 +403,7 @@ async def list_events(type: str | None = None) -> list[EventResponse]:
     events: list[EventResponse] = []
 
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with database.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 

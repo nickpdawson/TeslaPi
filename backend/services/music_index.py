@@ -8,6 +8,7 @@ from pathlib import Path
 import aiosqlite
 
 from backend.config import settings
+from backend import database
 from backend.services.share_browser import AUDIO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ async def index_library(mountpoint: str, db_path: str) -> dict:
         logger.info("Found %d audio files to index", len(files))
 
         # Phase 2: Insert into database incrementally
-        async with aiosqlite.connect(db_path) as db:
+        async with database.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
 
@@ -348,7 +349,7 @@ async def _index_mock(db_path: str) -> dict:
     _indexing_state["total_files"] = total_tracks
     logger.info("Dev mode: generating %d mock tracks", total_tracks)
 
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL")
 
         # Check if already populated
@@ -393,7 +394,7 @@ async def _index_mock(db_path: str) -> dict:
 
 async def search(db_path: str, query: str, limit: int = 50) -> list[dict]:
     """Full-text search returning matching tracks grouped by artist/album."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -442,7 +443,7 @@ async def search(db_path: str, query: str, limit: int = 50) -> list[dict]:
 
 async def get_artists(db_path: str, limit: int = 50, offset: int = 0, search_query: str = "") -> list[dict]:
     """Paginated artist list with track/album counts and total size."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -500,7 +501,7 @@ async def get_artists(db_path: str, limit: int = 50, offset: int = 0, search_que
 
 async def get_albums(db_path: str, artist: str) -> list[dict]:
     """Albums for a specific artist with track counts and size."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -523,7 +524,7 @@ async def get_albums(db_path: str, artist: str) -> list[dict]:
 
 async def get_random(db_path: str, count: int = 20, item_type: str = "artist") -> list[dict]:
     """Return N random artists or albums from the index."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -564,7 +565,7 @@ async def get_random(db_path: str, count: int = 20, item_type: str = "artist") -
 
 async def get_recent(db_path: str, count: int = 50) -> list[dict]:
     """Return most recently modified items (grouped by artist/album)."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
@@ -589,7 +590,7 @@ async def get_recent(db_path: str, count: int = 50) -> list[dict]:
 
 async def get_stats(db_path: str) -> dict:
     """Library statistics: total artists, albums, tracks, size."""
-    async with aiosqlite.connect(db_path) as db:
+    async with database.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
 
