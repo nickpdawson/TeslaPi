@@ -1772,3 +1772,15 @@ Job 29 died at ~42.9GB / 2430 files with error "database is locked". Root cause:
 - FIX (commit 8fe19b6): new `_connect()` async-context-manager sets `busy_timeout=30000` + WAL on EVERY sync DB connection (was 5s default). A starved write now waits instead of failing. Test test_connect_sets_generous_busy_timeout; backend 112 passing. Deployed to Pi.
 - RESUMED: job 30 (Sync New) running with the fix; excludes the 2041 done → 12,644 tracks / 31,450 files remaining. Batches completing on "attempt 1", no stalls.
 - FOLLOW-UP (not yet done): harden the FAILURE path so a stale loop can't leave the gadget down (e.g. force-detach + retry gadget-enable in cleanup), so any future mid-flight failure can't drop dashcam. Lower priority now that the root-cause lock is fixed.
+
+#### (iter 86) DB-lock fix was insufficient → robust lock-tolerance fix + resume (2026-08-13 ~12:35)
+Overnight, job 30 FAILED again on "database is locked" DESPITE the 30s busy_timeout (died at 2699 synced/16GB shortly after 19:15; sat failed ~16h because the 1Password SSH agent was locked ~13h so monitoring/auto-resume was blind). Gadget recovered cleanly this time (UDC up, no dashcam gap). Root gaps: (1) cosmetic ~1Hz progress writes were FATAL — a lock on one aborted the whole transfer; (2) terminal/checkpoint writes had no retry beyond the busy timeout; (3) busy_timeout only covered music_sync — auto_sync/dashcam/status/index still used the 5s default and could hold a lock.
+
+Robust fix (commit 82c7205, user chose "robust fix + resume"):
+- `_update_job_progress`: best-effort wrapper — a lock/error on a cosmetic progress write is swallowed+logged, never kills the transfer. Used for the 1Hz + final progress writes in _stream_rsync_progress.
+- `_update_job` + new `_mark_batch_synced`: retry on transient lock (_DB_WRITE_RETRIES=6, backoff) so terminal-status and per-batch checkpoint writes survive momentary locks.
+- App-wide busy timeout: new `database.connect()` (30s busy_timeout + WAL); auto_sync/dashcam(router+service)/status/music_index/music-router all routed through it (20 sites). music_sync._connect delegates to it.
+- Tests +5 (database.connect timeout; progress non-fatal; update_job retry + give-up; mark_batch retry). Backend 112→117 passing.
+
+Deployed. RESUMED as job 31 (Sync New, 1034 albums, 11,986 tracks remaining, ~18% already done). Batches completing on attempt 1. Monitoring re-armed with auto-resume.
+NOTE for the record: a full refresh fundamentally conflicts with dashcam during DRIVES (gadget down for the whole sync; a drive-away makes the CIFS source unreachable → sync fails within ~1h, gadget recovers). Realistic completion = progress during home/parked time, pauses when driven, over several days. Deferred failure-path loop-hardening still open.
