@@ -1784,3 +1784,6 @@ Robust fix (commit 82c7205, user chose "robust fix + resume"):
 
 Deployed. RESUMED as job 31 (Sync New, 1034 albums, 11,986 tracks remaining, ~18% already done). Batches completing on attempt 1. Monitoring re-armed with auto-resume.
 NOTE for the record: a full refresh fundamentally conflicts with dashcam during DRIVES (gadget down for the whole sync; a drive-away makes the CIFS source unreachable → sync fails within ~1h, gadget recovers). Realistic completion = progress during home/parked time, pauses when driven, over several days. Deferred failure-path loop-hardening still open.
+
+#### (iter 86) Full-refresh job 31 progress note — lock fix holding (2026-08-13 ~17:11)
+Job 31 (resumed 12:35 after the robust lock-tolerance fix) running clean: err None, ZERO 'database is locked' failures — the fix that job 30 needed is holding under sustained load. Progress (synced=1 / bytes): 12:35 resume 2699; 15:27 → 3110/10.9GB; 16:20 → 3457/22.7GB; 17:11 → 3798/34.1GB. ~3.7MB/s recent, 10,887 tracks remaining (~26% done overall). Link latency variable (ping 120-580ms across checks) so throughput fluctuates; still a multi-day completion at this rate. Monitoring on ~50min cadence, auto-resume on interruption; gadget/dashcam recovery armed. No user action needed.
