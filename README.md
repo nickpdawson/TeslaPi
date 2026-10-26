@@ -34,6 +34,7 @@ Inspired by marcone/teslausb's proven USB gadget approach, TeslaPi is built from
 - Virtual-scrolled artist/album tree with checkbox selection for selective sync
 - Real-time sync progress with rsync, automatic USB gadget lifecycle management
 - Sync queue with size estimates and cancellation support
+- Optional format preference (`MUSIC_PREFER_AAC`, off by default): copy a FLAC only when the share has no M4A/AAC of the same track in the same folder
 
 ### File Manager
 - Split-pane browser with tabs for Music, Light Show, and Boombox drives
@@ -217,13 +218,19 @@ curl -s http://<pi-ip>/api/health   # {"status":"ok","version":"0.2.0",...}
 All settings are manageable through the web UI at `http://<pi-ip>/settings`. Configuration sections include:
 
 - **General** -- Hostname, timezone, WiFi networks
-- **Network Shares** -- CIFS/NFS share configuration for archive and music sources, with connection testing
+- **Network Shares** -- CIFS/NFS share configuration for archive and music sources, with connection testing, plus the music format preference (`MUSIC_PREFER_AAC`)
 - **Drives** -- Backing file sizes, filesystem type, external drive (`DATA_DRIVE`) settings
 - **Notifications** -- Channel setup (Telegram, Discord, email, etc.) with per-event routing
 - **Home Assistant** -- URL, long-lived access token, MQTT settings, entity selection
 - **System** -- Reboot, log viewer, diagnostics
 
 The underlying `teslausb_setup_variables.conf` file is read and written by the backend, preserving its format for compatibility with the upstream teslausb scripts.
+
+### Music format preference
+
+If your library has both an M4A/AAC and a FLAC copy of the same tracks, set `MUSIC_PREFER_AAC=true` in the config (or turn on **Settings > Network Shares > Prefer M4A/AAC over FLAC**). A FLAC is then copied only when the source share has no `.m4a` or `.aac` file with the same base name in the same folder. The default is off, which copies every file.
+
+The check looks at the source share, not the drive, and syncs never delete anything. FLACs copied before you turned the option on stay on the drive until you delete them in the File Manager. "Sync New" skips FLACs that have an M4A/AAC twin while the option is on. See `teslapi_api.md` for the API details.
 
 ## Development
 

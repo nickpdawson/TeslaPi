@@ -737,12 +737,30 @@ async def start_new_sync() -> dict:
         newer_paths = []
         async with database.connect(settings.database_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT DISTINCT '/' || artist || '/' || album as path "
-                "FROM music_files WHERE synced = 0 GROUP BY artist, album"
-            ) as cursor:
-                async for row in cursor:
-                    newer_paths.append(row["path"])
+            if music_sync.prefer_aac_enabled():
+                # A FLAC with an M4A/AAC twin is never copied while the option is on,
+                # so it stays synced=0. Leave it out here, or every "Sync New" would
+                # re-offer its album forever.
+                rows = []
+                async with db.execute(
+                    "SELECT path, artist, album, synced FROM music_files"
+                ) as cursor:
+                    async for row in cursor:
+                        rows.append((row["path"], row["artist"], row["album"], row["synced"]))
+                skip = music_sync.flac_paths_to_skip([r[0] for r in rows])
+                seen = set()
+                for path, artist, album, synced in rows:
+                    if synced or path in skip or (artist, album) in seen:
+                        continue
+                    seen.add((artist, album))
+                    newer_paths.append(f"/{artist}/{album}")
+            else:
+                async with db.execute(
+                    "SELECT DISTINCT '/' || artist || '/' || album as path "
+                    "FROM music_files WHERE synced = 0 GROUP BY artist, album"
+                ) as cursor:
+                    async for row in cursor:
+                        newer_paths.append(row["path"])
 
         if not newer_paths:
             return {"job_id": None, "status": "idle", "mode": "new", "note": "No new files to sync"}

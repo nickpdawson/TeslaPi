@@ -44,6 +44,142 @@ GADGET_DISABLE = "/opt/teslapi/deploy/teslapi-gadget-disable.sh"
 _DB_WRITE_RETRIES = 6
 _DB_WRITE_RETRY_DELAY_SEC = 0.75
 
+# Format preference. When MUSIC_PREFER_AAC is true in the teslausb config, a FLAC is
+# copied only if the source has no M4A/AAC with the same base name in the same
+# directory. The check runs against the SOURCE share, never the destination, and the
+# sync never deletes anything — so a FLAC already on the drive stays put, and a FLAC
+# whose M4A twin is missing is still copied. Default off: behaviour is unchanged.
+PREFER_AAC_KEY = "MUSIC_PREFER_AAC"
+_AAC_EXTS = frozenset({".m4a", ".aac"})
+_FLAC_EXT = ".flac"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def prefer_aac_enabled() -> bool:
+    """True when the teslausb config sets MUSIC_PREFER_AAC to a true value.
+    An unreadable config counts as off, so a config problem can't change what syncs."""
+    from backend.services.config_manager import read_config
+    try:
+        value = read_config().get(PREFER_AAC_KEY, "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read %s from config (treating as off): %s", PREFER_AAC_KEY, exc)
+        return False
+    return value.strip().lower() in _TRUE_VALUES
+
+
+def flac_paths_to_skip(paths, list_dir=None) -> set[str]:
+    """Return the FLAC paths in ``paths`` that have an M4A/AAC twin in the source.
+
+    A twin is a file in the same directory with the same base name and a .m4a or
+    .aac extension (extension match is case-insensitive). Twins are looked up first
+    among ``paths`` themselves, then, if ``list_dir`` is given, in the directory
+    listing it returns for that directory (``list_dir(dir) -> list of names`` or
+    None when the directory can't be read). Selective syncs pass a ``list_dir`` that
+    reads the share, so a selection of a single FLAC still sees its M4A twin.
+    """
+    import posixpath
+
+    def split(path):
+        directory, name = posixpath.split(path)
+        stem, ext = posixpath.splitext(name)
+        return directory.strip("/"), stem, ext.lower()
+
+    aac = set()
+    flacs = []
+    for path in paths:
+        directory, stem, ext = split(path)
+        if ext in _AAC_EXTS:
+            aac.add((directory, stem))
+        elif ext == _FLAC_EXT:
+            flacs.append((path, directory, stem))
+
+    listed: dict[str, set[str]] = {}
+    skip = set()
+    for path, directory, stem in flacs:
+        if (directory, stem) in aac:
+            skip.add(path)
+            continue
+        if list_dir is None:
+            continue
+        if directory not in listed:
+            names = list_dir(directory) or []
+            listed[directory] = {
+                posixpath.splitext(n)[0] for n in names
+                if posixpath.splitext(n)[1].lower() in _AAC_EXTS
+            }
+        if stem in listed[directory]:
+            skip.add(path)
+    return skip
+
+
+def _list_share_dir(directory: str) -> list[str] | None:
+    """List one directory on the music source share (relative to its root)."""
+    try:
+        return os.listdir(os.path.join(SHARE_MOUNT, directory))
+    except OSError:
+        return None
+
+
+def _walk_share_files(root: str) -> list[str]:
+    """Every file under the share, as a path relative to ``root``."""
+    out = []
+    for dirpath, _dirs, files in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        for name in files:
+            out.append(name if rel_dir == "." else f"{rel_dir}/{name}")
+    return out
+
+
+def _rsync_literal_pattern(rel_path: str) -> str:
+    """Anchored rsync filter pattern matching exactly ``rel_path``.
+
+    rsync only treats a backslash as an escape when the pattern holds a wildcard
+    (``*``, ``?``, ``[``), so names without one are written as-is and names with one
+    get every wildcard and backslash escaped.
+    """
+    pattern = rel_path.lstrip("/")
+    if any(c in pattern for c in "*?["):
+        pattern = re.sub(r"([\\*?\[])", r"\\\1", pattern)
+    return "/" + pattern
+
+
+def _write_exclude_file(skip: set[str]) -> str:
+    """Write an --exclude-from file for the skipped FLACs; return its path."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".exclude", delete=False, encoding="utf-8") as f:
+        for path in sorted(skip):
+            if "\n" in path or "\r" in path:
+                continue  # can't be expressed as one filter line; copying it is harmless
+            f.write(_rsync_literal_pattern(path) + "\n")
+        return f.name
+
+
+async def _shrink_job_totals(db_path: str, job_id: int, skipped: set[str]) -> None:
+    """Take the skipped FLACs out of the job's files/bytes totals so the progress
+    bar matches what is actually copied. Cosmetic, so failures are only logged."""
+    if not skipped:
+        return
+    try:
+        skipped_bytes = 0
+        paths = list(skipped)
+        async with _connect(db_path) as db:
+            for i in range(0, len(paths), 500):
+                chunk = paths[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                async with db.execute(
+                    f"SELECT COALESCE(SUM(size_bytes), 0) FROM music_files WHERE path IN ({marks})",
+                    chunk,
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    skipped_bytes += row[0] if row else 0
+            await db.execute(
+                "UPDATE music_sync_jobs SET files_total = MAX(files_total - ?, 0), "
+                "bytes_total = MAX(bytes_total - ?, 0) WHERE id = ?",
+                (len(skipped), skipped_bytes, job_id),
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Sync job %s: total adjustment skipped (non-fatal): %s", job_id, exc)
+
 @contextlib.asynccontextmanager
 async def _connect(db_path: str):
     """Open the sync DB with the app-wide busy timeout + WAL. Delegates to the shared
@@ -289,6 +425,8 @@ async def _run_sync(job_id: int, paths: list[str], mode: str, db_path: str) -> N
                     # and each is checkpointed (synced=1 + progress persisted) so an
                     # interrupted sync resumes at the next batch instead of restarting.
                     file_list = await _build_file_list(paths, mode, db_path)
+                    if prefer_aac_enabled():
+                        file_list = await _drop_flacs_with_aac(job_id, file_list, db_path)
                     await _sync_file_list_in_batches(job_id, file_list, db_path)
 
             finally:
@@ -1058,9 +1196,43 @@ async def _ensure_image_unmounted(log_ctx: str = "image release", retries: int =
     return False
 
 
+async def _drop_flacs_with_aac(job_id: int, file_list: list[str], db_path: str) -> list[str]:
+    """Selective sync: remove FLACs that have an M4A/AAC twin on the share.
+    Skipped FLACs stay synced=0 in the index, so turning the option off later makes
+    them eligible again; "Sync New" applies the same rule and won't re-offer them."""
+    skip = await asyncio.to_thread(flac_paths_to_skip, file_list, _list_share_dir)
+    if not skip:
+        return file_list
+    logger.info("Sync job %d: skipping %d FLAC file(s) that have an M4A/AAC version", job_id, len(skip))
+    await _shrink_job_totals(db_path, job_id, skip)
+    return [p for p in file_list if p not in skip]
+
+
+async def _full_sync_excludes(job_id: int, db_path: str) -> tuple[list[str], str | None]:
+    """Full sync: build ``--exclude-from`` args for FLACs that have an M4A/AAC twin.
+    Returns ``(extra_args, exclude_file)``; the caller deletes the file."""
+    if not prefer_aac_enabled():
+        return [], None
+    files = await asyncio.to_thread(_walk_share_files, SHARE_MOUNT)
+    skip = flac_paths_to_skip(files)
+    if not skip:
+        return [], None
+    logger.info("Sync job %d: excluding %d FLAC file(s) that have an M4A/AAC version", job_id, len(skip))
+    # Index paths carry a leading slash; walked paths don't.
+    await _shrink_job_totals(db_path, job_id, {"/" + p for p in skip})
+    exclude_file = _write_exclude_file(skip)
+    return [f"--exclude-from={exclude_file}"], exclude_file
+
+
 async def _run_rsync_full(job_id: int, db_path: str) -> None:
     """Full rsync of the entire share via the supervised runner."""
-    success, rc, err, _run_bytes = await _supervise_rsync(job_id, db_path, [])
+    extra_args, exclude_file = await _full_sync_excludes(job_id, db_path)
+    try:
+        success, rc, err, _run_bytes = await _supervise_rsync(job_id, db_path, extra_args)
+    finally:
+        if exclude_file:
+            with contextlib.suppress(OSError):
+                os.unlink(exclude_file)
     if success:
         logger.info("Sync job %d: full rsync completed", job_id)
         # Deliberately do NOT bulk-mark synced here. Marking based on a filesystem

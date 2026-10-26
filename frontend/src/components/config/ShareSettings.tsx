@@ -1,13 +1,15 @@
 import { useState } from 'preact/hooks';
 import { FormField } from '../common/FormField';
 import { Select } from '../common/Select';
+import { Toggle } from '../common/Toggle';
 import { post } from '../../api/client';
 import type { ShareConfig } from '../../api/types';
 
 interface ShareSettingsProps {
   archiveShare?: ShareConfig;
   musicShare?: ShareConfig;
-  onSave: (updates: { archiveShare?: ShareConfig; musicShare?: ShareConfig }) => Promise<void>;
+  musicPreferAac?: boolean;
+  onSave: (updates: { archiveShare?: ShareConfig; musicShare?: ShareConfig; musicPreferAac?: boolean }) => Promise<void>;
 }
 
 const SHARE_TYPES = [
@@ -195,15 +197,16 @@ function ShareForm({ title, description, share, onChange, testEndpoint }: ShareF
   );
 }
 
-export function ShareSettings({ archiveShare: initArchive, musicShare: initMusic, onSave }: ShareSettingsProps) {
+export function ShareSettings({ archiveShare: initArchive, musicShare: initMusic, musicPreferAac: initPreferAac, onSave }: ShareSettingsProps) {
   const [archiveShare, setArchiveShare] = useState<ShareConfig>(initArchive ?? { type: 'cifs', server: '', path: '' });
   const [musicShare, setMusicShare] = useState<ShareConfig>(initMusic ?? { type: 'cifs', server: '', path: '' });
+  const [musicPreferAac, setMusicPreferAac] = useState(initPreferAac ?? false);
   const [saving, setSaving] = useState(false);
 
   async function handleSave() {
     setSaving(true);
     try {
-      await onSave({ archiveShare, musicShare });
+      await onSave({ archiveShare, musicShare, musicPreferAac });
     } finally {
       setSaving(false);
     }
@@ -228,6 +231,17 @@ export function ShareSettings({ archiveShare: initArchive, musicShare: initMusic
         onChange={setMusicShare}
         testEndpoint="/shares/test"
       />
+
+      <FormField
+        label="Format preference"
+        helpText="When on, a FLAC is copied only if the share has no M4A or AAC file with the same name in the same folder. Files already on the drive are not removed."
+      >
+        <Toggle
+          checked={musicPreferAac}
+          onChange={setMusicPreferAac}
+          label="Prefer M4A/AAC over FLAC"
+        />
+      </FormField>
 
       <div class="settings-actions">
         <button class="btn btn--primary" onClick={handleSave} disabled={saving}>

@@ -469,6 +469,28 @@ Sync only files newer than the last completed sync. Falls back to full sync if n
 
 ---
 
+#### Format preference (`MUSIC_PREFER_AAC`)
+
+Optional rule for libraries that hold both lossy and lossless copies of the same tracks. Set it in the teslausb config, through `PUT /api/config` or Settings > Network Shares > Format preference:
+
+```json
+{ "updates": { "MUSIC_PREFER_AAC": "true" } }
+```
+
+| Value | Effect |
+|-------|--------|
+| `false` (default, or unset) | Every file is copied. Same behaviour as before the option existed. |
+| `true` (also `1`, `yes`, `on`) | A `.flac` file is copied only when the source share has no `.m4a` or `.aac` file with the same base name in the same folder. |
+
+**Notes:**
+- The check runs against the source share, not the drive. A FLAC with no M4A/AAC twin is still copied.
+- No sync ever deletes files. FLACs copied before the option was turned on stay on the drive; remove them with `POST /api/music/local/delete`.
+- Applies to `POST /api/music/sync` (all modes), `/sync/full` and `/sync/new`. Skipped FLACs keep `synced = 0` in the index, so `/sync/new` leaves them out while the option is on and offers them again if it is turned off.
+- The job's `files_total` and `bytes_total` drop by the skipped files once the sync starts.
+- The value is read when each sync starts. No restart needed.
+
+---
+
 #### `GET /api/music/local`
 
 Scan the local music drive image and return what is currently on the Tesla's USB drive.
@@ -1053,6 +1075,8 @@ Update configuration values. Preserves file format and comments.
   "updated": ["ARCHIVE_SERVER", "cam_size"]
 }
 ```
+
+Music sync reads `MUSIC_PREFER_AAC` from this config. See [Format preference](#format-preference-music_prefer_aac).
 
 ---
 
