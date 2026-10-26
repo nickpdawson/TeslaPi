@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Music format preference (`MUSIC_PREFER_AAC`, off by default).** When on, a FLAC
+  is copied only if the source share has no M4A/AAC file with the same base name in
+  the same folder. Works for selective, full and "Sync New" syncs, never deletes
+  anything from the drive, and is set in **Settings → Network Shares** or via
+  `PUT /api/config`. Ported from the retired teslausb-musicsync script without its
+  bugs (it deleted every FLAC each run and still copied FLACs next to their M4As).
+
 ## v0.3.0 — App auth, archived-clip playback, security hardening
 
 Builds on v0.2.0 with a login gate, watchable archived dashcam footage, and another

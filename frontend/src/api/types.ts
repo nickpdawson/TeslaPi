@@ -124,6 +124,8 @@ export interface TeslaPiConfig {
   wifi: WiFiConfig;
   archive: ArchiveConfig;
   musicShare?: ShareConfig;
+  /** MUSIC_PREFER_AAC: copy a FLAC only when no M4A/AAC of the same track exists. */
+  musicPreferAac?: boolean;
   drives: DriveConfig[];
   dataDrive: string;
   ha?: HAConfig;

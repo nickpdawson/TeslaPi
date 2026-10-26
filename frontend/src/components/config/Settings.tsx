@@ -104,6 +104,7 @@ export function Settings(_props: SettingsProps) {
         username: raw['MUSIC_USER'],
         password: raw['MUSIC_PASSWORD'],
       } : undefined,
+      musicPreferAac: ['1', 'true', 'yes', 'on'].includes((raw['MUSIC_PREFER_AAC'] ?? '').trim().toLowerCase()),
       drives: [
         { name: 'cam', size: raw['CAM_SIZE'] ?? '140G', enabled: raw['CAM_ENABLED'] !== 'false', filesystem: (raw['CAM_FS'] ?? 'exfat') as 'ext4' | 'exfat' },
         { name: 'music', size: raw['MUSIC_SIZE'] ?? '1800G', enabled: raw['MUSIC_ENABLED'] !== 'false', filesystem: (raw['MUSIC_FS'] ?? 'exfat') as 'ext4' | 'exfat' },
@@ -172,8 +173,11 @@ export function Settings(_props: SettingsProps) {
     });
   }
 
-  async function handleShareSave(data: { archiveShare?: any; musicShare?: any }) {
+  async function handleShareSave(data: { archiveShare?: any; musicShare?: any; musicPreferAac?: boolean }) {
     const updates: Record<string, string> = {};
+    if (data.musicPreferAac !== undefined) {
+      updates['MUSIC_PREFER_AAC'] = data.musicPreferAac ? 'true' : 'false';
+    }
     if (data.archiveShare) {
       updates['SHARE_TYPE'] = data.archiveShare.type;
       updates['ARCHIVE_SERVER'] = data.archiveShare.server;
@@ -294,6 +298,7 @@ export function Settings(_props: SettingsProps) {
             <ShareSettings
               archiveShare={cfg.archive.share}
               musicShare={cfg.musicShare}
+              musicPreferAac={cfg.musicPreferAac ?? false}
               onSave={handleShareSave}
             />
           }
